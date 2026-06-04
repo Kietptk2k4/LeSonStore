@@ -11,10 +11,10 @@ const {
 } = require("../models");
 const sequelize = require("../config/database");
 const { Op } = require("sequelize");
-const { getPaymentUrl } = require("../services/vnpayService");
-
 const { quoteShipping } = require("../services/shippingService");
 const orderRepository = require("../services/order/orderRepository");
+const { getStrategy } = require("../services/payment/paymentStrategy");
+const vnpayStrategy = require("../services/payment/vnpayStrategy");
 const { getIO } = require("../config/socket")
 const toVnd = (x) => Math.max(0, Math.round(Number(x) || 0));
 const notificationService = require("../services/notificationService");
@@ -55,23 +55,6 @@ exports.createOrder = async (req, res, next) => {
       geo_lng,
     } = req.body;
 
-    // 0) Validate provider/method
-    const VALID = {
-      COD: ["COD"],
-      VNPAY: ["VNPAYQR", "VNBANK", "INTCARD", "INSTALLMENT"],
-    };
-    if (!payment_provider || !VALID[payment_provider]) {
-      await t.rollback();
-      return res
-        .status(400)
-        .json({ message: `Unsupported payment_provider: ${payment_provider}` });
-    }
-    if (!payment_method || !VALID[payment_provider].includes(payment_method)) {
-      await t.rollback();
-      return res.status(400).json({
-        message: `Invalid payment_method for provider ${payment_provider}`,
-      });
-    }
     if (!province_id || !ward_id) {
       await t.rollback();
       return res
@@ -84,7 +67,28 @@ exports.createOrder = async (req, res, next) => {
         .status(400)
         .json({ message: "Vui lòng xác nhận vị trí trên bản đồ" });
     }
-    const isVnpay = payment_provider === "VNPAY";
+
+    let strategy;
+    try {
+      if (!payment_provider) {
+        const err = new Error(`Unsupported payment_provider: ${payment_provider}`);
+        err.status = 400;
+        throw err;
+      }
+      strategy = getStrategy(payment_provider);
+      strategy.validateMethod(payment_method, "createOrder");
+    } catch (err) {
+      if (err.status) {
+        await t.rollback();
+        let message = err.message;
+        if (message.startsWith("Unsupported provider:")) {
+          message = `Unsupported payment_provider: ${payment_provider}`;
+        }
+        return res.status(err.status).json({ message });
+      }
+      throw err;
+    }
+
     let txnRef = null;
 
     // const { shipping_fee } = await quoteShipping({ province_id, ward_id, subtotal: items_subtotal });
@@ -213,7 +217,7 @@ exports.createOrder = async (req, res, next) => {
 
     // console.log("[amounts]", { totalAmount, discountAmount, finalAmount });
     // 3) Tạo Order
-    const holdMs = isVnpay ? 24 * 60 * 60 * 1000 : 0; // VNPAY 24h, COD = 0
+    const holdMs = strategy.getReserveHoldMs();
     const order = await Order.create(
       {
         user_id: req.user.user_id,
@@ -221,7 +225,7 @@ exports.createOrder = async (req, res, next) => {
         total_amount: totalAmount,
         discount_amount: discountAmount,
         final_amount: finalAmount,
-        status: isVnpay ? "AWAITING_PAYMENT" : "processing",
+        status: strategy.getInitialOrderStatus(),
         shipping_address,
         shipping_fee,
         shipping_phone,
@@ -236,9 +240,7 @@ exports.createOrder = async (req, res, next) => {
       { transaction: t }
     );
 
-    if (isVnpay) {
-      txnRef = `${order.order_id}-${Date.now()}`;
-    }
+    txnRef = strategy.buildTxnRef(order.order_id);
 
     // 4) Reserve: KHÓA & trừ kho, tạo OrderItem
     for (const it of itemsForOrder) {
@@ -277,14 +279,12 @@ exports.createOrder = async (req, res, next) => {
 
     // 5) Payment record
     await orderRepository.createPaymentRecord(
-      {
+      strategy.buildPaymentRecord({
         order_id: order.order_id,
-        provider: payment_provider,
         payment_method,
-        payment_status: "pending",
         amount: finalAmount,
-        txn_ref: txnRef,
-      },
+        txnRef,
+      }),
       t
     );
 
@@ -324,36 +324,22 @@ exports.createOrder = async (req, res, next) => {
       }
     }
 
-    // 7) VNPAY redirect (bọc lỗi cấu hình)
+    // 7) Payment redirect (VNPAY via strategy; COD → null)
     let redirect = null;
-    if (isVnpay) {
-      try {
-        const { getPaymentUrl } = require("../services/vnpayService");
-        if (typeof getPaymentUrl !== "function")
-          throw new Error("vnpayService.getPaymentUrl not found");
-        const requiredEnv = [
-          "VNP_TMN_CODE",
-          "VNP_HASHSECRET",
-          "VNP_RETURNURL",
-          "VNP_PAYURL",
-        ];
-        const missing = requiredEnv.filter((k) => !process.env[k]);
-        if (missing.length)
-          throw new Error("Missing ENV: " + missing.join(", "));
-
-        redirect = await getPaymentUrl({
-          method: payment_method,
-          amount: finalAmount,
-          txnRef,
-          orderDesc: `Thanh toan don hang ${order.order_code}`,
-          ipAddr: req.headers["x-forwarded-for"] || req.socket.remoteAddress,
-        });
-      } catch (e) {
-        await t.rollback();
-        return res
-          .status(502)
-          .json({ message: "VNPAY configuration error", detail: e.message });
-      }
+    try {
+      const paymentResult = await strategy.afterOrderCreated({
+        order,
+        payment_method,
+        amount: finalAmount,
+        txnRef,
+        req,
+      });
+      redirect = paymentResult.redirect;
+    } catch (e) {
+      await t.rollback();
+      return res
+        .status(502)
+        .json({ message: "VNPAY configuration error", detail: e.message });
     }
 
     await t.commit(); 
@@ -1133,16 +1119,15 @@ exports.retryVnpayPayment = async (req, res, next) => {
     }
 
     // 3) Tạo txn_ref mới (khuyến nghị tạo mới)
-    const newTxnRef = `${order.order_id}-${Date.now()}`;
+    const newTxnRef = vnpayStrategy.buildTxnRef(order.order_id);
     await payment.update({ txn_ref: newTxnRef }, { transaction: t });
 
     // 4) Build URL thanh toán
-    const redirect = await getPaymentUrl({
+    const redirect = await vnpayStrategy.buildRetryPaymentUrl({
+      order,
+      payment,
       method,
-      amount: Number(payment.amount || order.final_amount || 0),
-      txnRef: newTxnRef,
-      orderDesc: `Thanh toan don hang ${order.order_code}`,
-      ipAddr: req.headers["x-forwarded-for"] || req.socket.remoteAddress,
+      req,
     });
 
     // (tuỳ chọn) set thời hạn link để FE hiển thị
@@ -1290,18 +1275,16 @@ exports.changePaymentMethod = async (req, res, next) => {
     const { order_id } = req.params;
     const { provider, method } = req.body || {};
 
-    const VALID = {
-      COD: ["COD"],
-      VNPAY: ["VNPAYQR", "VNBANK", "INTCARD", "INSTALLMENT"],
-    };
-
-    if (!provider || !VALID[provider]) {
-      await t.rollback();
-      return res.status(400).json({ message: `Unsupported provider: ${provider}` });
-    }
-    if (!method || !VALID[provider].includes(method)) {
-      await t.rollback();
-      return res.status(400).json({ message: `Invalid method for provider ${provider}` });
+    let strategy;
+    try {
+      strategy = getStrategy(provider);
+      strategy.validateMethod(method, "changePayment");
+    } catch (err) {
+      if (err.status) {
+        await t.rollback();
+        return res.status(err.status).json({ message: err.message });
+      }
+      throw err;
     }
 
     // Lock order & payment
@@ -1337,65 +1320,20 @@ exports.changePaymentMethod = async (req, res, next) => {
     }
 
     let redirect = null;
-
-    if (provider === "COD") {
-      // chuyển sang COD
-      await payment.update(
-        {
-          provider: "COD",
-          payment_method: "COD",
-          payment_status: "pending",
-          amount: Number(order.final_amount || 0),
-          transaction_id: null,
-          txn_ref: null,
-          raw_return: null,
-          raw_ipn: null,
-          paid_at: null,
-        },
-        { transaction: t }
-      );
-
-      // đơn COD ở flow của bạn = "processing"
-      await order.update({ status: "processing" }, { transaction: t });
-    } else {
-      // chuyển sang VNPAY
-      const newTxnRef = `${order.order_id}-${Date.now()}`;
-
-      await payment.update(
-        {
-          provider: "VNPAY",
-          payment_method: method,
-          payment_status: "pending",
-          amount: Number(order.final_amount || 0),
-          transaction_id: null,
-          txn_ref: newTxnRef,
-          raw_return: null,
-          raw_ipn: null,
-          paid_at: null,
-        },
-        { transaction: t }
-      );
-
-      await order.update({ status: "AWAITING_PAYMENT" }, { transaction: t });
-
-      // build URL thanh toán
-      try {
-        const { getPaymentUrl } = require("../services/vnpayService");
-        const requiredEnv = ["VNP_TMN_CODE", "VNP_HASHSECRET", "VNP_RETURNURL", "VNP_PAYURL"];
-        const missing = requiredEnv.filter((k) => !process.env[k]);
-        if (missing.length) throw new Error("Missing ENV: " + missing.join(", "));
-
-        redirect = await getPaymentUrl({
-          method,
-          amount: Number(payment.amount || order.final_amount || 0),
-          txnRef: newTxnRef,
-          orderDesc: `Thanh toan don hang ${order.order_code}`,
-          ipAddr: req.headers["x-forwarded-for"] || req.socket.remoteAddress,
-        });
-      } catch (e) {
-        await t.rollback();
-        return res.status(502).json({ message: "VNPAY configuration error", detail: e.message });
-      }
+    try {
+      const changeResult = await strategy.applyChangePayment({
+        order,
+        payment,
+        method,
+        req,
+        transaction: t,
+      });
+      redirect = changeResult.redirect;
+    } catch (e) {
+      await t.rollback();
+      return res
+        .status(502)
+        .json({ message: "VNPAY configuration error", detail: e.message });
     }
 
     await t.commit();

@@ -1,0 +1,74 @@
+@startuml payment_strategy_class_step02
+title LeSonStore — Bước 2: Payment Strategy (COD / VNPAY)
+
+skinparam classAttributeIconSize 0
+
+class "paymentStrategy.js\ngetStrategy(provider)" as Registry {
+  +getStrategy(provider): Strategy
+}
+
+interface "PaymentStrategy\n(hợp đồng object JS)" as IStrategy {
+  +provider: string
+  +allowedMethods: string[]
+  +validateMethod(method, context)
+  +getInitialOrderStatus()
+  +getReserveHoldMs()
+  +buildTxnRef(orderId)
+  +buildPaymentRecord(...)
+  +afterOrderCreated(...)
+  +applyChangePayment(...)
+  +buildRetryPaymentUrl(...)
+  +applySuccessfulReturn(...)
+}
+
+class "codStrategy.js" as COD {
+  provider = "COD"
+}
+
+class "vnpayStrategy.js" as VNPAY {
+  provider = "VNPAY"
+}
+
+class "vnpayGateway.js" as Gateway {
+  +createPaymentUrl(params)
+  +verifyCallback(query)
+}
+
+class "vnpayService.js" as VnpaySvc {
+  +getPaymentUrl()
+  +verifyReturnUrl()
+}
+
+class "orderController.js\ncreateOrder\nchangePaymentMethod\nretryVnpayPayment" as OrderCtrl
+
+class "vnpayController.js\nvnpayReturn\ncreatePayment" as VnpayCtrl
+
+class "orderRepository.js\ncreatePaymentRecord" as Repo
+
+Registry --> IStrategy : trả về
+COD ..|> IStrategy
+VNPAY ..|> IStrategy
+
+VNPAY --> Gateway : createPaymentUrl\nverifyCallback (return)
+Gateway --> VnpaySvc : bọc, HMAC giữ nguyên
+
+OrderCtrl --> Registry : getStrategy("COD"|"VNPAY")
+OrderCtrl --> Repo : buildPaymentRecord → createPaymentRecord
+OrderCtrl --> COD : afterOrderCreated / applyChangePayment
+OrderCtrl --> VNPAY : afterOrderCreated / applyChangePayment / buildRetryPaymentUrl
+
+VnpayCtrl --> Gateway : verifyCallback
+VnpayCtrl --> VNPAY : applySuccessfulReturn
+
+note right of Registry
+  Thêm MoMo:
+  strategies.MOMO = require("./momoStrategy")
+  — không cần Facade (Bước 3)
+end note
+
+note bottom of VNPAY
+  Strategy không import crypto;
+  chỉ gọi vnpayGateway
+end note
+
+@enduml

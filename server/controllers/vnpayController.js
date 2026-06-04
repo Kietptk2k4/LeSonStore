@@ -1,5 +1,6 @@
-const { Payment, Order } = require("../models");
-const { getPaymentUrl, verifyReturnUrl } = require("../services/vnpayService");
+const { Payment, Order, User, Role } = require("../models");
+const vnpayGateway = require("../services/gateways/vnpayGateway");
+const vnpayStrategy = require("../services/payment/vnpayStrategy");
 
 const notificationService = require("../services/notificationService");
 
@@ -19,7 +20,7 @@ exports.createPayment = async (req, res) => {
     // TxnRef nên unique (orderId-timestamp)
     const txnRef = `${orderId}-${Date.now()}`;
 
-    const url = await getPaymentUrl({
+    const url = await vnpayGateway.createPaymentUrl({
       amount,
       txnRef,
       orderDesc: `Thanh toan don hang #${orderId}`,
@@ -37,7 +38,7 @@ exports.createPayment = async (req, res) => {
 // 2. Xử lý khi user quay lại từ VNPAY (Return URL)
 exports.vnpayReturn = async (req, res) => {
   try {
-    const { isSuccess, vnp_Params } = verifyReturnUrl({ ...req.query });
+    const { isSuccess, vnp_Params } = vnpayGateway.verifyCallback({ ...req.query });
 
     // Lấy Order ID từ txnRef (format: orderId-timestamp)
     const txnRef = vnp_Params["vnp_TxnRef"] || "";
@@ -55,16 +56,14 @@ exports.vnpayReturn = async (req, res) => {
       const payment = await Payment.findOne({ where: { order_id: orderId } });
 
       if (order && payment) {
-        if (payment.payment_status !== "completed") {
-          payment.payment_status = "completed";
-          payment.txn_ref = txnRef;
-          payment.transaction_id = vnp_Params["vnp_TransactionNo"] || null;
-          payment.paid_at = new Date();
-          await payment.save();
+        const { updated } = await vnpayStrategy.applySuccessfulReturn({
+          order,
+          payment,
+          txnRef,
+          vnp_Params,
+        });
 
-          order.status = "processing";
-          await order.save();
-
+        if (updated) {
            // =========================================================
           // 3. GỬI THÔNG BÁO (NOTIFICATION SERVICE) - UPDATED
           // =========================================================
