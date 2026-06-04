@@ -1,0 +1,99 @@
+@startuml repository_class_step01
+title LeSonStore — Bước 1: Repository Pattern (orderRepository)
+
+skinparam classAttributeIconSize 0
+skinparam packageStyle rectangle
+
+package "Controller Layer" {
+  class "orderController.js" as OrderCtrl <<controller>> {
+    +createOrder(req, res, next)
+    +cancelOrder(req, res, next)
+  }
+}
+
+package "Repository Layer\nserver/services/order/" {
+  class "orderRepository.js" as OrderRepo <<repository>> {
+    +reserveVariationStock(variationId, quantity, transaction)
+    +createPaymentRecord(data, transaction)
+    +findOrderWithItemsAndPayment(orderId, { userId, transaction, lockOrder })
+    +releaseVariationStock(variationId, quantity, transaction)
+  }
+}
+
+package "Model Layer (Sequelize)\nserver/models/" {
+  class Order <<entity>> {
+    +order_id
+    +user_id
+    +status
+    +findOne(options)
+  }
+
+  class OrderItem <<entity>> {
+    +order_id
+    +variation_id
+    +quantity
+    +findAll(options)
+  }
+
+  class Payment <<entity>> {
+    +order_id
+    +provider
+    +payment_status
+    +create(data, options)
+    +findOne(options)
+  }
+
+  class ProductVariation <<entity>> {
+    +variation_id
+    +stock_quantity
+    +findOne(options)
+    +decrement(field, options)
+    +increment(field, options)
+  }
+}
+
+interface "Transaction\n(sequelize.transaction())" as Txn {
+  +commit()
+  +rollback()
+  +LOCK.UPDATE
+}
+
+OrderCtrl --> OrderRepo : gọi trong\ncreateOrder / cancelOrder
+
+OrderRepo --> Order : findOne\n(lockOrder: FOR UPDATE)
+OrderRepo --> OrderItem : findAll
+OrderRepo --> Payment : create / findOne
+OrderRepo --> ProductVariation : findOne + lock\n decrement / increment
+
+OrderRepo ..> Txn : mọi hàm nhận\ntransaction
+
+note right of OrderRepo
+  **Repository che Sequelize:**
+  Controller không gọi trực tiếp
+  ProductVariation.findOne(lock)
+  hay Payment.create — logic DB
+  tập trung tại orderRepository.js
+end note
+
+note bottom of OrderCtrl
+  Bước 3 (chưa có): orderFacade
+  sẽ orchestration → gọi OrderRepo
+  **Không** thay thế Repository
+end note
+
+note as N1
+  **createOrder** dùng:
+  reserveVariationStock
+  createPaymentRecord
+end note
+
+note as N2
+  **cancelOrder** dùng:
+  findOrderWithItemsAndPayment
+  releaseVariationStock
+end note
+
+OrderRepo .. N1
+OrderRepo .. N2
+
+@enduml

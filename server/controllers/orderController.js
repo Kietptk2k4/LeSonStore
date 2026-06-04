@@ -14,6 +14,7 @@ const { Op } = require("sequelize");
 const { getPaymentUrl } = require("../services/vnpayService");
 
 const { quoteShipping } = require("../services/shippingService");
+const orderRepository = require("../services/order/orderRepository");
 const { getIO } = require("../config/socket")
 const toVnd = (x) => Math.max(0, Math.round(Number(x) || 0));
 const notificationService = require("../services/notificationService");
@@ -241,27 +242,17 @@ exports.createOrder = async (req, res, next) => {
 
     // 4) Reserve: KHÓA & trừ kho, tạo OrderItem
     for (const it of itemsForOrder) {
-      // ✅ KHÓA ở đây, KHÔNG include
-      const v = await ProductVariation.findOne({
-        where: { variation_id: it.variation_id },
-        transaction: t,
-        lock: t.LOCK.UPDATE,
-        skipLocked: true,
-      });
-      if (!v) {
+      const reserveResult = await orderRepository.reserveVariationStock(
+        it.variation_id,
+        it.quantity,
+        t
+      );
+      if (!reserveResult.ok) {
         await t.rollback();
-        return res.status(400).json({
-          message: `Variation ${it.variation_id} not found during reserve`,
-        });
+        return res
+          .status(reserveResult.status)
+          .json({ message: reserveResult.message });
       }
-      if (Number(v.stock_quantity || 0) < it.quantity) {
-        await t.rollback();
-        return res.status(400).json({
-          message: `Out of stock during reserve for ${it.variation_id}`,
-        });
-      }
-
-      await v.decrement("stock_quantity", { by: it.quantity, transaction: t });
 
       const price = Number(it.variation.price);
       const pct = Math.max(
@@ -285,8 +276,7 @@ exports.createOrder = async (req, res, next) => {
     }
 
     // 5) Payment record
-
-    await Payment.create(
+    await orderRepository.createPaymentRecord(
       {
         order_id: order.order_id,
         provider: payment_provider,
@@ -295,7 +285,7 @@ exports.createOrder = async (req, res, next) => {
         amount: finalAmount,
         txn_ref: txnRef,
       },
-      { transaction: t }
+      t
     );
 
     // 6) Clear cart (xoá các món đã chọn; nếu không truyền items → xoá toàn bộ)
@@ -816,29 +806,17 @@ exports.cancelOrder = async (req, res, next) => {
     const { order_id } = req.params;
     const reason = (req.body?.reason || "").slice(0, 500);
 
-    // 1) KHÓA CHỈ BẢNG orders (KHÔNG include)
-    const order = await Order.findOne({
-      where: { order_id, user_id: req.user.user_id },
-      transaction: t,
-      lock: t.LOCK.UPDATE, // SELECT ... FOR UPDATE
-      skipLocked: true,
-    });
+    const orderBundle = await orderRepository.findOrderWithItemsAndPayment(
+      order_id,
+      { userId: req.user.user_id, transaction: t, lockOrder: true }
+    );
 
-    if (!order) {
+    if (!orderBundle) {
       await t.rollback();
       return res.status(404).json({ message: "Order not found" });
     }
 
-    // 2) Lấy payment & items bằng TRUY VẤN RIÊNG (không lock outer join)
-    const payment = await Payment.findOne({
-      where: { order_id: order.order_id },
-      transaction: t,
-    });
-
-    const items = await OrderItem.findAll({
-      where: { order_id: order.order_id },
-      transaction: t,
-    });
+    const { order, payment, items } = orderBundle;
 
     // Guard: với flow của bạn, Payment gần như luôn có.
     // Nếu đề phòng thiếu, có thể xử lý thêm:
@@ -873,14 +851,11 @@ exports.cancelOrder = async (req, res, next) => {
 
     // ====== Hoàn kho (đơn nào tạo cũng đã reserve kho) ======
     for (const it of items) {
-      const v = await ProductVariation.findOne({
-        where: { variation_id: it.variation_id },
-        transaction: t,
-        lock: t.LOCK.UPDATE,
-        skipLocked: true,
-      });
-      if (!v) continue;
-      await v.increment("stock_quantity", { by: it.quantity, transaction: t });
+      await orderRepository.releaseVariationStock(
+        it.variation_id,
+        it.quantity,
+        t
+      );
     }
 
     // ====== Cập nhật trạng thái theo case ======
