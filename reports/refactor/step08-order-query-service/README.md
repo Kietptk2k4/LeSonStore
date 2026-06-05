@@ -42,6 +42,15 @@ Tách **read** (danh sách đơn) khỏi **write** (`orderFacade`). Module `orde
 
 Helper: `buildOrderDetailIncludes({ sortItems })` — includes items→variation→product + payment.
 
+### Counters (C6)
+
+| Method | Route | Rules |
+|--------|-------|--------|
+| `getOrderCountersV2` | `GET /api/orders/counters` | `aggregateCountersV2` — align tab filters `listUserOrdersV2` (to_ship/shipping cần payment OR) |
+| `getOrderCounters` | legacy export | `aggregateCountersLegacy` — mọi `processing` → `to_ship` |
+
+`fetchOrdersForCounters` → `Order.findAll` + in-memory loop (không SQL GROUP BY).
+
 ## Khác biệt V2 vs Legacy
 
 | | V2 | Legacy |
@@ -55,7 +64,7 @@ Helper: `buildOrderDetailIncludes({ sortItems })` — includes items→variation
 
 ```bash
 cd server
-npm test -- __tests__/orders/viewUserOrders.test.js __tests__/orders/viewOrderDetail.test.js __tests__/orders/viewOrderDetailSlim.test.js __tests__/orders/orderPaymentCountdownBe.test.js
+npm test -- __tests__/orders/viewUserOrders.test.js __tests__/orders/viewOrderDetail.test.js __tests__/orders/viewOrderDetailSlim.test.js __tests__/orders/orderPaymentCountdownBe.test.js __tests__/orders/viewOrderTabCounters.test.js
 ```
 
 ## Liên quan

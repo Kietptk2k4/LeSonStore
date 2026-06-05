@@ -389,6 +389,122 @@ async function getOrderDetailSlim({ userId, orderId }) {
   return { order: mapOrderDetailSlim(orderRow.toJSON()) };
 }
 
+function createEmptyCounters() {
+  return {
+    all: 0,
+    awaiting_payment: 0,
+    processing: 0,
+    to_ship: 0,
+    shipping: 0,
+    delivered: 0,
+    cancelled: 0,
+    failed: 0,
+  };
+}
+
+async function fetchOrdersForCounters(userId) {
+  return Order.findAll({
+    where: { user_id: userId },
+    include: [{ model: Payment, as: "payment", required: false }],
+    attributes: ["order_id", "status"],
+  });
+}
+
+function aggregateCountersLegacy(rows) {
+  const counters = createEmptyCounters();
+
+  for (const o of rows) {
+    counters.all += 1;
+    const p = o.payment;
+
+    if (
+      o.status === "AWAITING_PAYMENT" &&
+      p?.provider === "VNPAY" &&
+      p?.payment_status === "pending"
+    ) {
+      counters.awaiting_payment += 1;
+    }
+
+    if (o.status === "processing") {
+      counters.processing += 1;
+      counters.to_ship += 1;
+    }
+
+    if (o.status === "shipping") counters.shipping += 1;
+
+    if (o.status === "delivered" && p?.payment_status === "completed") {
+      counters.delivered += 1;
+    }
+
+    if (o.status === "cancelled" || o.status === "FAILED") {
+      counters.cancelled += 1;
+    }
+
+    if (o.status === "FAILED") counters.failed += 1;
+  }
+
+  return counters;
+}
+
+function aggregateCountersV2(rows) {
+  const counters = createEmptyCounters();
+
+  for (const o of rows) {
+    counters.all += 1;
+    const p = o.payment;
+    const prov = p?.provider;
+    const pstatus = p?.payment_status;
+
+    if (
+      o.status === "AWAITING_PAYMENT" &&
+      prov === "VNPAY" &&
+      pstatus === "pending"
+    ) {
+      counters.awaiting_payment += 1;
+    }
+
+    if (o.status === "processing") {
+      counters.processing += 1;
+      if (
+        (prov === "COD" && pstatus === "pending") ||
+        (prov === "VNPAY" && pstatus === "completed")
+      ) {
+        counters.to_ship += 1;
+      }
+    }
+
+    if (
+      o.status === "shipping" &&
+      ((prov === "COD" && pstatus === "pending") ||
+        (prov === "VNPAY" && pstatus === "completed"))
+    ) {
+      counters.shipping += 1;
+    }
+
+    if (o.status === "delivered" && pstatus === "completed") {
+      counters.delivered += 1;
+    }
+
+    if (o.status === "cancelled" || o.status === "FAILED") {
+      counters.cancelled += 1;
+    }
+
+    if (o.status === "FAILED") counters.failed += 1;
+  }
+
+  return counters;
+}
+
+async function getOrderCounters({ userId }) {
+  const rows = await fetchOrdersForCounters(userId);
+  return aggregateCountersLegacy(rows);
+}
+
+async function getOrderCountersV2({ userId }) {
+  const rows = await fetchOrdersForCounters(userId);
+  return aggregateCountersV2(rows);
+}
+
 module.exports = {
   parseListQuery,
   mapOrderListRow,
@@ -398,4 +514,10 @@ module.exports = {
   getOrderDetailById,
   getOrderDetailSlim,
   mapOrderDetailSlim,
+  createEmptyCounters,
+  fetchOrdersForCounters,
+  aggregateCountersLegacy,
+  aggregateCountersV2,
+  getOrderCounters,
+  getOrderCountersV2,
 };
