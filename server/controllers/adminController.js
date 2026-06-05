@@ -8,348 +8,81 @@ const {
 } = require("../services/order/orderStateMachine")
 const { registerOrderListeners } = require("../events/listeners")
 const refundService = require("../services/order/refundService")
+const adminProductService = require("../services/admin/adminProductService")
+const analyticsService = require("../services/admin/analyticsService")
 
 registerOrderListeners()
+
+function sendServiceError(res, error) {
+  return res.status(error.status).json({ message: error.message })
+}
 
 // Product Management
 exports.createProduct = [
   uploadProductFiles,
   async (req, res, next) => {
-    const transaction = await sequelize.transaction()
-
     try {
-      const {
-        product_name,
-        slug,
-        description,
-        category_id,
-        brand_id,
-        discount_percentage,
-        variations: variationsString,
-      } = req.body
-
-      let variations
-      try {
-        variations = JSON.parse(variationsString)
-      } catch (parseError) {
-        await transaction.rollback()
-        return res.status(400).json({ message: "Invalid variations data" })
-      }
-
-      // Validation: Ensure exactly one variation is marked as primary
-      if (!variations || variations.length === 0) {
-        await transaction.rollback()
-        return res.status(400).json({ message: "At least one variation is required" })
-      }
-
-      const primaryVariations = variations.filter(v => v.is_primary === true)
-      if (primaryVariations.length !== 1) {
-        await transaction.rollback()
-        return res.status(400).json({ message: "Exactly one variation must be marked as primary" })
-      }
-
-      // Handle thumbnail upload
-      let thumbnail_url = null
-      if (req.files && req.files.thumbnail && req.files.thumbnail[0]) {
-        thumbnail_url = req.files.thumbnail[0].path
-      }
-
-      // Create product
-      const product = await Product.create(
-        {
-          product_name,
-          slug,
-          description,
-          category_id,
-          brand_id,
-          discount_percentage,
-          thumbnail_url,
-          is_active: true,
-        },
-        { transaction },
-      )
-
-      // Create variations
-      if (variations && variations.length > 0) {
-        const variationData = variations.map((v) => ({
-          ...v,
-          product_id: product.product_id,
-        }))
-        await ProductVariation.bulkCreate(variationData, { transaction })
-      }
-
-      // Create product images
-      if (req.files && req.files.product_images && req.files.product_images.length > 0) {
-        const imageData = req.files.product_images.map((file, index) => ({
-          product_id: product.product_id,
-          image_url: file.path,
-          is_primary: false,
-          display_order: index,
-        }))
-        await ProductImage.bulkCreate(imageData, { transaction })
-      }
-
-      await transaction.commit()
-
-      res.status(201).json({
-        message: "Product created successfully",
-        product,
+      const result = await adminProductService.createProduct({
+        body: req.body,
+        files: req.files,
       })
+      return res.status(result.statusCode).json(result.body)
     } catch (error) {
-      await transaction.rollback()
+      if (error.status) return sendServiceError(res, error)
       next(error)
     }
-  }
+  },
 ]
 
-// Update Product with Variations Sync
 exports.updateProduct = [
   uploadProductFiles,
   async (req, res, next) => {
-    const transaction = await sequelize.transaction();
-
     try {
-      const { product_id } = req.params;
-      const {
-        product_name,
-        slug,
-        description,
-        category_id,
-        brand_id,
-        discount_percentage,
-        variations: variationsString,
-      } = req.body;
-
-      // Parse variations data
-      let variations = [];
-      try {
-        variations = variationsString ? JSON.parse(variationsString) : [];
-      } catch (parseError) {
-        await transaction.rollback();
-        return res.status(400).json({ message: "Invalid variations data" });
-      }
-
-      // Tìm sản phẩm
-      const product = await Product.findByPk(product_id);
-      if (!product) {
-        await transaction.rollback();
-        return res.status(404).json({ message: "Product not found" });
-      }
-
-      // Validation: Ensure exactly one variation is marked as primary
-      if (variations.length > 0) {
-        const primaryVariations = variations.filter(v => v.is_primary === true);
-        if (primaryVariations.length !== 1) {
-          await transaction.rollback();
-          return res.status(400).json({ message: "Exactly one variation must be marked as primary" });
-        }
-      }
-
-      // Prepare product update data
-      const updateData = {
-        product_name,
-        slug,
-        description,
-        category_id,
-        brand_id,
-        discount_percentage,
-        is_active: req.body.is_active !== undefined ? req.body.is_active : product.is_active,
-      };
-
-      // Handle thumbnail update
-      if (req.files && req.files.thumbnail && req.files.thumbnail[0]) {
-        updateData.thumbnail_url = req.files.thumbnail[0].path;
-      }
-
-      // Update product
-      await product.update(updateData, { transaction });
-
-      // Sync variations
-      if (variations.length > 0) {
-        // Get existing variations
-        const existingVariations = await ProductVariation.findAll({
-          where: { product_id: product_id },
-          transaction
-        });
-
-        const existingVariationIds = existingVariations.map(v => v.variation_id);
-        const incomingVariationIds = variations
-          .filter(v => v.variation_id)
-          .map(v => v.variation_id);
-
-        // Variations to update (existing ones that are still in the list)
-        const variationsToUpdate = variations.filter(v => v.variation_id);
-        // Variations to create (new ones without variation_id)
-        const variationsToCreate = variations.filter(v => !v.variation_id);
-        // Variations to delete (existing ones not in the incoming list)
-        const variationsToDelete = existingVariationIds.filter(
-          id => !incomingVariationIds.includes(id)
-        );
-
-        // Update existing variations
-        for (const variation of variationsToUpdate) {
-          await ProductVariation.update(
-            {
-              processor: variation.processor,
-              ram: variation.ram,
-              storage: variation.storage,
-              graphics_card: variation.graphics_card,
-              screen_size: variation.screen_size,
-              color: variation.color,
-              price: variation.price,
-              stock_quantity: variation.stock_quantity,
-              is_primary: variation.is_primary,
-              sku: variation.sku,
-            },
-            {
-              where: { variation_id: variation.variation_id },
-              transaction
-            }
-          );
-        }
-
-        // Create new variations
-        if (variationsToCreate.length > 0) {
-          const newVariationsData = variationsToCreate.map(v => ({
-            product_id: product_id,
-            processor: v.processor,
-            ram: v.ram,
-            storage: v.storage,
-            graphics_card: v.graphics_card,
-            screen_size: v.screen_size,
-            color: v.color,
-            price: v.price,
-            stock_quantity: v.stock_quantity,
-            is_primary: v.is_primary,
-            sku: v.sku,
-          }));
-
-          await ProductVariation.bulkCreate(newVariationsData, { transaction });
-        }
-
-        // Delete removed variations
-        if (variationsToDelete.length > 0) {
-          await ProductVariation.destroy({
-            where: {
-              variation_id: variationsToDelete,
-              product_id: product_id
-            },
-            transaction
-          });
-        }
-      }
-
-      // Handle image deletions
-      if (req.body.deleted_image_ids) {
-        let idsToDelete = req.body.deleted_image_ids;
-        if (!Array.isArray(idsToDelete)) {
-          idsToDelete = [idsToDelete];
-        }
-
-        await ProductImage.destroy({
-          where: {
-            image_id: idsToDelete,
-            product_id: product_id
-          },
-          transaction
-        });
-      }
-
-      // Handle new product images
-      if (req.files && req.files.product_images && req.files.product_images.length > 0) {
-        const newImages = req.files.product_images.map((file, index) => ({
-          product_id: product_id,
-          image_url: file.path,
-          is_primary: false,
-          display_order: index,
-        }));
-
-        await ProductImage.bulkCreate(newImages, { transaction });
-      }
-
-      // Commit transaction
-      await transaction.commit();
-
-      // Get updated product with all relations
-      const updatedProduct = await Product.findByPk(product_id, {
-        include: [
-          { model: ProductImage, as: 'images' },
-          { model: ProductVariation, as: 'variations' }
-        ]
-      });
-
-      res.json({
-        message: "Product updated successfully",
-        product: updatedProduct,
-      });
-
+      const result = await adminProductService.updateProduct({
+        productId: req.params.product_id,
+        body: req.body,
+        files: req.files,
+      })
+      return res.status(result.statusCode).json(result.body)
     } catch (error) {
-      await transaction.rollback();
-      next(error);
+      if (error.status) return sendServiceError(res, error)
+      next(error)
     }
-  }
-];
+  },
+]
 
 exports.deleteProduct = async (req, res, next) => {
   try {
-    const { product_id } = req.params
-
-    const product = await Product.findByPk(product_id)
-    if (!product) {
-      return res.status(404).json({ message: "Product not found" })
-    }
-
-    // Soft delete
-    await product.update({ is_active: false })
-
-    res.json({ message: "Product deleted successfully" })
+    const result = await adminProductService.deleteProduct(req.params.product_id)
+    return res.json(result.body)
   } catch (error) {
+    if (error.status) return sendServiceError(res, error)
     next(error)
   }
 }
 
-// Variation Management
 exports.createVariation = async (req, res, next) => {
   try {
-    const { product_id } = req.params
-    const variationData = req.body
-
-    const product = await Product.findByPk(product_id)
-    if (!product) {
-      return res.status(404).json({ message: "Product not found" })
-    }
-
-    const variation = await ProductVariation.create({
-      ...variationData,
-      product_id,
+    const result = await adminProductService.createVariation({
+      productId: req.params.product_id,
+      variationData: req.body,
     })
-
-    res.status(201).json({
-      message: "Variation created successfully",
-      variation,
-    })
+    return res.status(result.statusCode).json(result.body)
   } catch (error) {
+    if (error.status) return sendServiceError(res, error)
     next(error)
   }
 }
 
 exports.updateVariation = async (req, res, next) => {
   try {
-    const { variation_id } = req.params
-    const updateData = req.body
-
-    const variation = await ProductVariation.findByPk(variation_id)
-    if (!variation) {
-      return res.status(404).json({ message: "Variation not found" })
-    }
-
-    await variation.update(updateData)
-
-    res.json({
-      message: "Variation updated successfully",
-      variation,
+    const result = await adminProductService.updateVariation({
+      variationId: req.params.variation_id,
+      updateData: req.body,
     })
+    return res.json(result.body)
   } catch (error) {
+    if (error.status) return sendServiceError(res, error)
     next(error)
   }
 }
@@ -884,205 +617,8 @@ exports.updateUserRoles = async (req, res, next) => {
 // Analytics & Dashboard
 exports.getDashboardAnalytics = async (req, res, next) => {
   try {
-    const { period = '30' } = req.query
-    const periodDays = parseInt(period)
-
-    // Calculate date range for period
-    const periodStartDate = new Date()
-    periodStartDate.setDate(periodStartDate.getDate() - periodDays)
-
-    // Get total counts (all time)
-    const [totalUsers, totalProducts] = await Promise.all([
-      User.count(),
-      Product.count({ where: { is_active: true } }),
-    ])
-
-    // Get period-specific data
-    const [totalOrders, totalRevenue, totalDiscount, deliveredOrders] = await Promise.all([
-      Order.count({
-        where: {
-          created_at: { [Op.gte]: periodStartDate }
-        }
-      }),
-      Order.sum('final_amount', {
-        where: {
-          status: 'delivered',
-          created_at: { [Op.gte]: periodStartDate }
-        }
-      }),
-      Order.sum('discount_amount', {
-        where: {
-          status: 'delivered',
-          created_at: { [Op.gte]: periodStartDate }
-        }
-      }),
-      Order.count({
-        where: {
-          status: 'delivered',
-          created_at: { [Op.gte]: periodStartDate }
-        }
-      }),
-    ])
-
-    // Calculate AOV (Average Order Value) and success rate for period
-    const aov = deliveredOrders > 0 ? (totalRevenue || 0) / deliveredOrders : 0
-    const successRate = totalOrders > 0 ? (deliveredOrders / totalOrders) * 100 : 0
-
-    // Get recent orders (last 7 days)
-    const sevenDaysAgo = new Date()
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7)
-
-    const recentOrders = await Order.count({
-      where: {
-        created_at: { [Op.gte]: sevenDaysAgo },
-      },
-    })
-
-    // Get sales data for the period (for line chart)
-    const salesData = await Order.findAll({
-      attributes: [
-        [Sequelize.fn('DATE', Sequelize.col('created_at')), 'date'],
-        [Sequelize.fn('COUNT', Sequelize.col('order_id')), 'order_count'],
-        [Sequelize.fn('SUM', Sequelize.col('final_amount')), 'total_revenue'],
-      ],
-      where: {
-        created_at: { [Op.gte]: periodStartDate },
-        status: 'delivered'
-      },
-      group: [Sequelize.fn('DATE', Sequelize.col('created_at'))],
-      order: [[Sequelize.fn('DATE', Sequelize.col('created_at')), 'ASC']],
-      raw: true,
-    })
-
-    // Get order status breakdown
-    const orderStatusStats = await Order.findAll({
-      attributes: [
-        'status',
-        [Sequelize.fn('COUNT', Sequelize.col('order_id')), 'count'],
-      ],
-      group: ['status'],
-      raw: true,
-    })
-
-    // Get low stock alerts (10 products/variations with lowest stock)
-    const lowStockAlertsRaw = await sequelize.query(`
-      SELECT
-        pv.variation_id,
-        pv.sku,
-        pv.stock_quantity,
-        p.product_name,
-        p.thumbnail_url
-      FROM product_variations pv
-      JOIN products p ON pv.product_id = p.product_id
-      WHERE pv.stock_quantity > 0
-        AND pv.is_available = true
-        AND p.is_active = true
-      ORDER BY pv.stock_quantity ASC
-      LIMIT 10
-    `, {
-      type: Sequelize.QueryTypes.SELECT,
-      raw: true,
-    })
-
-    // Transform to match frontend expected format
-    const lowStockAlerts = lowStockAlertsRaw.map(item => ({
-      variation_id: item.variation_id,
-      sku: item.sku,
-      stock_quantity: item.stock_quantity,
-      'product.product_name': item.product_name,
-      'product.thumbnail_url': item.thumbnail_url,
-    }))
-
-    // Get sales by category (simplified query)
-    const salesByCategory = await sequelize.query(`
-      SELECT
-        c.category_name,
-        SUM(oi.quantity) as total_quantity,
-        SUM(oi.price * oi.quantity) as total_revenue
-      FROM order_items oi
-      JOIN product_variations pv ON oi.variation_id = pv.variation_id
-      JOIN products p ON pv.product_id = p.product_id
-      JOIN categories c ON p.category_id = c.category_id
-      GROUP BY c.category_id, c.category_name
-      ORDER BY total_revenue DESC
-      LIMIT 5
-    `, {
-      type: Sequelize.QueryTypes.SELECT,
-      raw: true,
-    })
-
-    // Get sales by brand (simplified query)
-    const salesByBrand = await sequelize.query(`
-      SELECT
-        b.brand_name,
-        SUM(oi.quantity) as total_quantity,
-        SUM(oi.price * oi.quantity) as total_revenue
-      FROM order_items oi
-      JOIN product_variations pv ON oi.variation_id = pv.variation_id
-      JOIN products p ON pv.product_id = p.product_id
-      JOIN brands b ON p.brand_id = b.brand_id
-      GROUP BY b.brand_id, b.brand_name
-      ORDER BY total_revenue DESC
-      LIMIT 5
-    `, {
-      type: Sequelize.QueryTypes.SELECT,
-      raw: true,
-    })
-
-    // Get top selling products with better details (simplified query)
-    const topProducts = await sequelize.query(`
-      SELECT
-        pv.sku,
-        pv.processor,
-        pv.ram,
-        pv.storage,
-        p.product_name,
-        p.thumbnail_url,
-        SUM(oi.quantity) as total_quantity,
-        SUM(oi.price * oi.quantity) as total_revenue
-      FROM order_items oi
-      JOIN product_variations pv ON oi.variation_id = pv.variation_id
-      JOIN products p ON pv.product_id = p.product_id
-      GROUP BY pv.variation_id, pv.sku, pv.processor, pv.ram, pv.storage, p.product_id, p.product_name, p.thumbnail_url
-      ORDER BY total_quantity DESC
-      LIMIT 5
-    `, {
-      type: Sequelize.QueryTypes.SELECT,
-      raw: true,
-    })
-
-    // Transform to match frontend expected format
-    const formattedTopProducts = topProducts.map(product => ({
-      sku: product.sku,
-      processor: product.processor,
-      ram: product.ram,
-      storage: product.storage,
-      total_quantity: product.total_quantity,
-      total_revenue: product.total_revenue,
-      'product.product_name': product.product_name,
-      'product.thumbnail_url': product.thumbnail_url,
-    }))
-
-    res.json({
-      totals: {
-        users: totalUsers,
-        products: totalProducts,
-        orders: totalOrders,
-        revenue: totalRevenue || 0,
-        discount: totalDiscount || 0,
-        aov: Math.round(aov),
-        success_rate: Math.round(successRate * 100) / 100,
-      },
-      recent: {
-        orders_last_7_days: recentOrders,
-      },
-      order_status_breakdown: orderStatusStats,
-      low_stock_alerts: lowStockAlerts,
-      sales_by_category: salesByCategory,
-      sales_by_brand: salesByBrand,
-      top_products: formattedTopProducts,
-      sales_data: salesData,
-    })
+    const data = await analyticsService.getDashboard({ period: req.query.period })
+    return res.json(data)
   } catch (error) {
     next(error)
   }
@@ -1090,62 +626,8 @@ exports.getDashboardAnalytics = async (req, res, next) => {
 
 exports.getSalesAnalytics = async (req, res, next) => {
   try {
-    const { period = '30' } = req.query // days
-    const startDate = new Date()
-    startDate.setDate(startDate.getDate() - parseInt(period))
-
-    // Daily sales data
-    const salesData = await Order.findAll({
-      attributes: [
-        [Sequelize.fn('DATE', Sequelize.col('created_at')), 'date'],
-        [Sequelize.fn('COUNT', Sequelize.col('order_id')), 'order_count'],
-        [Sequelize.fn('SUM', Sequelize.col('final_amount')), 'total_revenue'],
-      ],
-      where: {
-        created_at: { [Op.gte]: startDate },
-        status: 'delivered', // Only completed orders
-      },
-      group: [Sequelize.fn('DATE', Sequelize.col('created_at'))],
-      order: [[Sequelize.fn('DATE', Sequelize.col('created_at')), 'ASC']],
-      raw: true,
-    })
-
-    // Monthly comparison
-    const currentMonth = new Date()
-    const lastMonth = new Date()
-    lastMonth.setMonth(lastMonth.getMonth() - 1)
-
-    const [currentMonthSales, lastMonthSales] = await Promise.all([
-      Order.sum('final_amount', {
-        where: {
-          created_at: {
-            [Op.gte]: new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1),
-            [Op.lt]: new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 1),
-          },
-          status: 'delivered',
-        },
-      }),
-      Order.sum('final_amount', {
-        where: {
-          created_at: {
-            [Op.gte]: new Date(lastMonth.getFullYear(), lastMonth.getMonth(), 1),
-            [Op.lt]: new Date(lastMonth.getFullYear(), lastMonth.getMonth() + 1, 1),
-          },
-          status: 'delivered',
-        },
-      }),
-    ])
-
-    res.json({
-      sales_data: salesData,
-      comparison: {
-        current_month: currentMonthSales || 0,
-        last_month: lastMonthSales || 0,
-        growth_percentage: lastMonthSales
-          ? ((currentMonthSales - lastMonthSales) / lastMonthSales * 100).toFixed(2)
-          : 0,
-      },
-    })
+    const data = await analyticsService.getSales({ period: req.query.period })
+    return res.json(data)
   } catch (error) {
     next(error)
   }
