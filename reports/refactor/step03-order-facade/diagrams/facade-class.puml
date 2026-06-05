@@ -7,15 +7,18 @@ class "orderController.js\n(thin handlers)" as Ctrl {
   +createOrder(req, res, next)
   +cancelOrder(req, res, next)
   +changePaymentMethod(req, res, next)
+  +previewOrder(req, res, next)
+  +retryVnpayPayment(req, res, next)
   ..other exports unchanged..
   +getUserOrdersV2(...)
-  +retryVnpayPayment(...)
 }
 
 class "orderFacade.js" as Facade {
   +createFromCart({ userId, user, body, req })
   +cancelOrder({ userId, orderId, reason })
   +changePaymentMethod({ userId, orderId, provider, method, req })
+  +previewOrder({ body })
+  +retryVnpayPayment({ userId, orderId, method, req })
 }
 
 class "paymentStrategy.js\ngetStrategy" as Strategy
@@ -29,8 +32,8 @@ class "orderPaymentMethodChangedListener.js" as L2
 
 database "PostgreSQL\n(Sequelize)" as DB
 
-Ctrl --> Facade : 3 luồng chính
-Facade --> Strategy : validate, afterOrderCreated,\napplyChangePayment
+Ctrl --> Facade : create, cancel, change payment,\npreview, retry VNPAY
+Facade --> Strategy : validate, afterOrderCreated,\napplyChangePayment, applyRetryPayment
 Facade --> Repo : reserve, payment, find bundle
 Facade --> DB : Order, OrderItem, Cart, ...
 Facade --> Bus : emit sau commit
@@ -38,8 +41,8 @@ Bus ..> L1 : order.created
 Bus ..> L2 : order.payment_method.changed
 
 note bottom of Ctrl
-  GET / list / retry / preview
-  vẫn trong controller — không qua Facade
+  GET / list handlers
+  vẫn trong controller
 end note
 
 @enduml

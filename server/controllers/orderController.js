@@ -12,7 +12,6 @@ const sequelize = require("../config/database");
 const { Op } = require("sequelize");
 const { quoteShipping } = require("../services/shippingService");
 const orderFacade = require("../services/order/orderFacade");
-const vnpayStrategy = require("../services/payment/vnpayStrategy");
 const { emitOrderEvent } = require("../events/orderEventBus");
 const { getIO } = require("../config/socket")
 const toVnd = (x) => Math.max(0, Math.round(Number(x) || 0));
@@ -526,71 +525,16 @@ exports.getOrderDetailSlim = async (req, res, next) => {
 };
 
 exports.retryVnpayPayment = async (req, res, next) => {
-  const t = await sequelize.transaction();
   try {
-    const { order_id } = req.params;
-    const { method = "VNPAYQR" } = req.body || {}; // VNPAYQR | VNBANK | INTCARD
-
-    // 1) Lấy order & payment
-    const order = await Order.findOne({
-      where: { order_id, user_id: req.user.user_id },
-      transaction: t,
-      lock: t.LOCK.UPDATE,
-    });
-    if (!order) {
-      await t.rollback();
-      return res.status(404).json({ message: "Order not found" });
-    }
-
-    const payment = await Payment.findOne({
-      where: { order_id: order.order_id, provider: "VNPAY" },
-      transaction: t,
-      lock: t.LOCK.UPDATE,
-    });
-    if (!payment) {
-      await t.rollback();
-      return res
-        .status(400)
-        .json({ message: "Payment record not found or not VNPAY" });
-    }
-
-    // 2) Điều kiện cho phép retry
-    const allow =
-      payment.payment_status === "pending" &&
-      (order.status === "AWAITING_PAYMENT" || order.status === "FAILED");
-
-    if (!allow) {
-      await t.rollback();
-      return res
-        .status(400)
-        .json({ message: "Order not eligible for retry payment" });
-    }
-
-    // 3) Tạo txn_ref mới (khuyến nghị tạo mới)
-    const newTxnRef = vnpayStrategy.buildTxnRef(order.order_id);
-    await payment.update({ txn_ref: newTxnRef }, { transaction: t });
-
-    // 4) Build URL thanh toán
-    const redirect = await vnpayStrategy.buildRetryPaymentUrl({
-      order,
-      payment,
-      method,
+    const result = await orderFacade.retryVnpayPayment({
+      userId: req.user.user_id,
+      orderId: req.params.order_id,
+      method: req.body?.method,
       req,
     });
-
-    // (tuỳ chọn) set thời hạn link để FE hiển thị
-    const expires_at = new Date(Date.now() + 15 * 60 * 1000); // 15 phút
-
-    await t.commit();
-    return res.json({
-      redirect,
-      order_id: order.order_id,
-      txn_ref: newTxnRef,
-      expires_at: expires_at.toISOString(),
-    });
-  } catch (err) {
-    await t.rollback();
-    next(err);
+    return res.status(result.statusCode).json(result.body);
+  } catch (error) {
+    return handleFacadeError(error, res, next);
   }
 };
 

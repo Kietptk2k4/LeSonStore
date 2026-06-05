@@ -73,6 +73,16 @@ Logic copy từ `changePaymentMethod` nhánh COD/VNPAY. Return `{ redirect }` (`
 | VNPAY | URL redirect (không kiểm ENV — giữ hành vi `retryVnpayPayment` cũ) |
 | COD | throw 400 nếu gọi nhầm |
 
+### `applyRetryPayment({ order, payment, method, req, transaction })` (VNPAY only)
+
+| Bước | Hành vi |
+|------|---------|
+| 1 | `validateMethod(method, "createOrder")` |
+| 2 | `buildTxnRef` + `payment.update({ txn_ref })` |
+| 3 | `buildRetryPaymentUrl` → `{ redirect, txn_ref }` |
+
+Gọi từ `orderFacade.retryVnpayPayment` (C2). **Không** đổi `order.status`, **không** emit event.
+
 ### `applySuccessfulReturn({ order, payment, txnRef, vnp_Params })`
 
 Chỉ VNPAY (COD no-op `{ updated: false }`). Cập nhật:

@@ -121,6 +121,28 @@ Luồng `POST /api/orders/preview` — **read-only**, không transaction, không
 
 ---
 
+## `retryVnpayPayment({ userId, orderId, method, req })`
+
+Luồng `POST /api/orders/:order_id/payments/retry` — VNPAY only.
+
+| Bước | Hành vi |
+|------|---------|
+| Strategy | `getStrategy("VNPAY")`, `validateMethod`, `applyRetryPayment` |
+| Lock | transaction + `LOCK.UPDATE` |
+| Eligible | `payment_status === pending` AND `order.status` IN (`AWAITING_PAYMENT`, `FAILED`) |
+| Persist | Chỉ `payment.update({ txn_ref })` — **không** `order.update`, không emit |
+
+**Return:**
+
+```js
+{
+  statusCode: 200,
+  body: { redirect, order_id, txn_ref, expires_at }  // expires_at = now + 15 phút ISO
+}
+```
+
+---
+
 ## Domain Service — `orderPricing.js`
 
 | Hàm | Mô tả |

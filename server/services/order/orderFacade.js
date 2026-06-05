@@ -558,9 +558,87 @@ async function previewOrder({ body }) {
   };
 }
 
+/**
+ * POST /api/orders/:order_id/payments/retry
+ * @param {{ userId, orderId, method?, req }} params
+ */
+async function retryVnpayPayment({ userId, orderId, method, req }) {
+  const paymentMethod = method || "VNPAYQR";
+  const t = await sequelize.transaction();
+
+  try {
+    const strategy = getStrategy("VNPAY");
+    try {
+      strategy.validateMethod(paymentMethod, "createOrder");
+    } catch (err) {
+      if (err.status) {
+        await t.rollback();
+        throwHttp(err.status, err.message);
+      }
+      throw err;
+    }
+
+    const order = await Order.findOne({
+      where: { order_id: orderId, user_id: userId },
+      transaction: t,
+      lock: t.LOCK.UPDATE,
+    });
+    if (!order) {
+      await t.rollback();
+      throwHttp(404, "Order not found");
+    }
+
+    const payment = await Payment.findOne({
+      where: { order_id: order.order_id, provider: "VNPAY" },
+      transaction: t,
+      lock: t.LOCK.UPDATE,
+    });
+    if (!payment) {
+      await t.rollback();
+      throwHttp(400, "Payment record not found or not VNPAY");
+    }
+
+    const allow =
+      payment.payment_status === "pending" &&
+      (order.status === "AWAITING_PAYMENT" || order.status === "FAILED");
+    if (!allow) {
+      await t.rollback();
+      throwHttp(400, "Order not eligible for retry payment");
+    }
+
+    const { redirect, txn_ref: newTxnRef } = await strategy.applyRetryPayment({
+      order,
+      payment,
+      method: paymentMethod,
+      req,
+      transaction: t,
+    });
+
+    const expires_at = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+    await t.commit();
+
+    return {
+      statusCode: 200,
+      body: {
+        redirect,
+        order_id: order.order_id,
+        txn_ref: newTxnRef,
+        expires_at,
+      },
+    };
+  } catch (error) {
+    if (!error.status) {
+      await t.rollback();
+    }
+    throw error;
+  }
+}
+
 module.exports = {
   createFromCart,
   cancelOrder,
   changePaymentMethod,
   previewOrder,
+  retryVnpayPayment,
 };

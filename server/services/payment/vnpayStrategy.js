@@ -124,6 +124,19 @@ async function buildRetryPaymentUrl({ order, payment, method, req }) {
   });
 }
 
+async function applyRetryPayment({ order, payment, method, req, transaction }) {
+  validateMethod(method, "createOrder");
+  const newTxnRef = buildTxnRef(order.order_id);
+  await payment.update({ txn_ref: newTxnRef }, { transaction });
+  const redirect = await buildRetryPaymentUrl({
+    order,
+    payment,
+    method,
+    req,
+  });
+  return { redirect, txn_ref: newTxnRef };
+}
+
 async function applySuccessfulReturn({ order, payment, txnRef, vnp_Params }) {
   if (payment.payment_status === "completed") {
     return { updated: false };
@@ -154,5 +167,6 @@ module.exports = {
   afterOrderCreated,
   applyChangePayment,
   buildRetryPaymentUrl,
+  applyRetryPayment,
   applySuccessfulReturn,
 };
