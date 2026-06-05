@@ -15,9 +15,12 @@ const {
   Role,
 } = require("../models");
 const { Op, Sequelize } = require("sequelize");
-const axios = require("axios");
-const BASE = process.env.RECO_API_BASE || "http://127.0.0.1:8000";
-const TIMEOUT = +(process.env.RECO_TIMEOUT_MS || 7000);
+const recommendationProxy = require("../services/recommendationProxy");
+const {
+  RecommendationUpstreamError,
+  RecommendationAdapterError,
+  BASE,
+} = recommendationProxy;
 
 // helper: nhận string CSV, array, hoặc single → trả về mảng số
 const parseIdList = (input) => {
@@ -658,23 +661,7 @@ exports.getRecommendedByVariation = async (req, res) => {
   if (!variationId) return res.status(400).json({ products: [], error: "invalid variation_id" });
 
   try {
-    const resp = await axios.get(`${BASE}/recommend`, {
-      params: { variation_id: variationId },
-      timeout: TIMEOUT,
-      validateStatus: () => true, // nhận cả 4xx/5xx để đọc body
-    });
-
-    if (resp.status >= 400) {
-      return res.status(502).json({
-        products: [],
-        basedOn: { variationId },
-        source: "knn",
-        error: `upstream_${resp.status}`,
-        upstream: resp.data,
-      });
-    }
-
-    const payload = resp.data;
+    const payload = await recommendationProxy.getRecommendations(variationId);
 
     // ---- HỖ TRỢ NHIỀU KIỂU SHAPE ----
     // 1) Chuẩn: { items: [...] }
@@ -743,6 +730,27 @@ exports.getRecommendedByVariation = async (req, res) => {
     });
   } catch (e) {
     console.error("getRecommendedByVariation EX:", e);
+
+    if (e instanceof RecommendationUpstreamError) {
+      return res.status(502).json({
+        products: [],
+        basedOn: { variationId },
+        source: "knn",
+        error: `upstream_${e.upstreamStatus}`,
+        upstream: e.upstream,
+      });
+    }
+
+    if (e instanceof RecommendationAdapterError) {
+      return res.status(502).json({
+        products: [],
+        basedOn: { variationId },
+        source: "knn",
+        error: "adapter_exception",
+        detail: { message: e.message, code: e.code, base: e.base ?? BASE },
+      });
+    }
+
     return res.status(502).json({
       products: [],
       basedOn: { variationId },
