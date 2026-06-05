@@ -1,0 +1,45 @@
+@startuml facade_class_step03
+title LeSonStore — Bước 3: Order Facade (class)
+
+skinparam classAttributeIconSize 0
+
+class "orderController.js\n(thin handlers)" as Ctrl {
+  +createOrder(req, res, next)
+  +cancelOrder(req, res, next)
+  +changePaymentMethod(req, res, next)
+  ..other exports unchanged..
+  +getUserOrdersV2(...)
+  +retryVnpayPayment(...)
+}
+
+class "orderFacade.js" as Facade {
+  +createFromCart({ userId, user, body, req })
+  +cancelOrder({ userId, orderId, reason })
+  +changePaymentMethod({ userId, orderId, provider, method, req })
+}
+
+class "paymentStrategy.js\ngetStrategy" as Strategy
+
+class "orderRepository.js" as Repo
+
+class "orderEventBus.js\nemitOrderEvent" as Bus
+
+class "orderCreatedListener.js" as L1
+class "orderPaymentMethodChangedListener.js" as L2
+
+database "PostgreSQL\n(Sequelize)" as DB
+
+Ctrl --> Facade : 3 luồng chính
+Facade --> Strategy : validate, afterOrderCreated,\napplyChangePayment
+Facade --> Repo : reserve, payment, find bundle
+Facade --> DB : Order, OrderItem, Cart, ...
+Facade --> Bus : emit sau commit
+Bus ..> L1 : order.created
+Bus ..> L2 : order.payment_method.changed
+
+note bottom of Ctrl
+  GET / list / retry / preview
+  vẫn trong controller — không qua Facade
+end note
+
+@enduml

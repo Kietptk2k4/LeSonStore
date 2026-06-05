@@ -1,0 +1,34 @@
+@startuml facade_create_order_sequence_step03
+title LeSonStore — Sequence: createOrder qua Facade
+
+actor Client
+participant "orderController\ncreateOrder" as Ctrl
+participant "orderFacade\ncreateFromCart" as Facade
+participant "paymentStrategy\ngetStrategy" as Strategy
+participant "orderRepository" as Repo
+database "PostgreSQL" as DB
+participant "orderEventBus" as Bus
+participant "orderCreatedListener" as Listener
+
+Client -> Ctrl : POST /api/orders
+Ctrl -> Facade : createFromCart({ userId, user, body, req })
+Facade -> Strategy : getStrategy + validateMethod
+Facade -> DB : transaction begin
+Facade -> DB : Cart / items / Order.create
+Facade -> Repo : reserveVariationStock
+Facade -> DB : OrderItem.create
+Facade -> Repo : createPaymentRecord
+Facade -> Strategy : afterOrderCreated → redirect
+Facade -> DB : commit
+Facade -> Bus : emit("order.created", payload)
+Bus -> Listener : async handler
+Listener -> Listener : notification + sendOrderConfirmationEmail
+Facade --> Ctrl : { statusCode: 201, body }
+Ctrl --> Client : 201 JSON
+
+note over Facade, Listener
+  Listener chạy sau commit;
+  không block HTTP response
+end note
+
+@enduml

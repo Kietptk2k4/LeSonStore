@@ -3,6 +3,9 @@ const http = require("http")
 const cors = require("cors")
 require("dotenv").config()
 
+const { registerOrderListeners } = require("./events/listeners")
+registerOrderListeners()
+
 const sequelize = require("./config/database")
 const errorHandler = require("./middleware/errorHandler")
 const { initSocket } = require("./config/socket")

@@ -7,414 +7,40 @@ const {
   Payment,
   Product,
   User,
-  Role,
 } = require("../models");
 const sequelize = require("../config/database");
 const { Op } = require("sequelize");
 const { quoteShipping } = require("../services/shippingService");
-const orderRepository = require("../services/order/orderRepository");
-const { getStrategy } = require("../services/payment/paymentStrategy");
+const orderFacade = require("../services/order/orderFacade");
 const vnpayStrategy = require("../services/payment/vnpayStrategy");
 const { getIO } = require("../config/socket")
 const toVnd = (x) => Math.max(0, Math.round(Number(x) || 0));
-const notificationService = require("../services/notificationService");
 
-// Generate unique order code
-const generateOrderCode = () => {
-  const timestamp = Date.now().toString(36).toUpperCase();
-  const random = Math.random().toString(36).substring(2, 6).toUpperCase();
-  return `ORD-${timestamp}-${random}`;
-};
-// Gộp thêm ghi chú hủy (nếu có)
-function appendNote(oldNote, reason) {
-  const r = (reason || "").trim();
-  if (!r) return oldNote || "";
-  const head = `[Cancel @${new Date().toISOString()}] ${r}`;
-  return oldNote ? `${oldNote}\n${head}` : head;
+function handleFacadeError(error, res, next) {
+  if (error.status) {
+    const payload = { message: error.message };
+    if (error.detail !== undefined) payload.detail = error.detail;
+    return res.status(error.status).json(payload);
+  }
+  return next(error);
 }
+
 // Create order from cart
 exports.createOrder = async (req, res, next) => {
-  // Guard auth (nếu bạn đã có middleware set req.user)
   if (!req.user || !req.user.user_id) {
     return res.status(401).json({ message: "Unauthorized" });
   }
 
-  const t = await sequelize.transaction();
   try {
-    const {
-      shipping_address,
-      shipping_phone,
-      shipping_name,
-      note,
-      payment_provider, // "COD" | "VNPAY"
-      payment_method, // "COD" | "VNPAYQR" | "VNBANK" | "INTCARD" | "INSTALLMENT"
-      items, // OPTIONAL: [{ variation_id, quantity }]
-      province_id,
-      ward_id,
-      geo_lat,
-      geo_lng,
-    } = req.body;
-
-    if (!province_id || !ward_id) {
-      await t.rollback();
-      return res
-        .status(400)
-        .json({ message: "Vui lòng chọn Tỉnh/Thành và Phường/Xã" });
-    }
-    if (geo_lat == null || geo_lng == null) {
-      await t.rollback();
-      return res
-        .status(400)
-        .json({ message: "Vui lòng xác nhận vị trí trên bản đồ" });
-    }
-
-    let strategy;
-    try {
-      if (!payment_provider) {
-        const err = new Error(`Unsupported payment_provider: ${payment_provider}`);
-        err.status = 400;
-        throw err;
-      }
-      strategy = getStrategy(payment_provider);
-      strategy.validateMethod(payment_method, "createOrder");
-    } catch (err) {
-      if (err.status) {
-        await t.rollback();
-        let message = err.message;
-        if (message.startsWith("Unsupported provider:")) {
-          message = `Unsupported payment_provider: ${payment_provider}`;
-        }
-        return res.status(err.status).json({ message });
-      }
-      throw err;
-    }
-
-    let txnRef = null;
-
-    // const { shipping_fee } = await quoteShipping({ province_id, ward_id, subtotal: items_subtotal });
-
-    // 1) Chuẩn bị itemsForOrder
-    let itemsForOrder = [];
-
-    if (Array.isArray(items) && items.length > 0) {
-      // a) Dùng items từ body (KHÔNG lock ở đây vì có include)
-      for (const it of items) {
-        const variation = await ProductVariation.findByPk(it.variation_id, {
-          include: [{ model: Product, as: "product" }],
-          transaction: t,
-          // ❌ KHÔNG lock / skipLocked ở truy vấn có include
-        });
-        if (!variation) {
-          await t.rollback();
-          return res
-            .status(400)
-            .json({ message: `Variation ${it.variation_id} not found` });
-        }
-        itemsForOrder.push({
-          variation,
-          variation_id: variation.variation_id,
-          quantity: Number(it.quantity || 1),
-        });
-      }
-    } else {
-      // b) Lấy từ Cart theo 2 bước: Cart -> CartItem+Variation (không lock trong include)
-      const cart = await Cart.findOne({
-        where: { user_id: req.user.user_id },
-        transaction: t,
-      });
-      if (!cart) {
-        await t.rollback();
-        return res.status(400).json({ message: "Cart is empty" });
-      }
-      ``;
-
-      const cartItems = await CartItem.findAll({
-        where: { cart_id: cart.cart_id },
-        include: [
-          {
-            model: ProductVariation,
-            as: "variation",
-            include: [{ model: Product, as: "product" }], // ✅ alias đúng
-          },
-        ],
-        transaction: t,
-      });
-      if (cartItems.length === 0) {
-        await t.rollback();
-        return res.status(400).json({ message: "Cart is empty" });
-      }
-
-      itemsForOrder = cartItems.map((ci) => ({
-        variation: ci.variation,
-        variation_id: ci.variation_id,
-        quantity: ci.quantity,
-      }));
-    }
-
-    // 2) Kiểm tra kho + tính tiền (giá lấy từ DB)
-    let totalAmount = 0;
-    let discountAmount = 0;
-
-    for (const it of itemsForOrder) {
-      const v = it.variation;
-      const available = Number(v.stock_quantity || 0);
-      if (!v.is_available || available < it.quantity) {
-        await t.rollback();
-        return res.status(400).json({
-          message: `Insufficient stock for ${
-            v.product?.product_name || `variation ${it.variation_id}`
-          }`,
-        });
-      }
-
-      const price = Number(v.price);
-      const pct = Math.max(0, Number(v.product?.discount_percentage || 0)); // %
-      const itemTotal = price * it.quantity;
-      const itemDiscount = Math.round(((price * pct) / 100) * it.quantity);
-
-      totalAmount += itemTotal;
-      discountAmount += itemDiscount;
-    }
-
-    const items_breakdown = itemsForOrder.map((it) => {
-      const v = it.variation;
-      const price = Number(v.price);
-      const pct = Math.max(0, Number(v.product?.discount_percentage || 0)); // %
-      const unit_discount_amount = Math.round((price * pct) / 100);
-      const unit_final_price = Math.max(0, price - unit_discount_amount);
-
-      const itemTotal = price * it.quantity;
-      const itemDiscount = Math.round(unit_discount_amount * it.quantity);
-
-      return {
-        variation_id: it.variation_id,
-        product_name: v.product?.product_name || null, // ✅ alias đúng
-        quantity: it.quantity,
-
-        unit_price: Math.round(price),
-        unit_discount_amount,
-        unit_final_price,
-
-        item_total: Math.round(itemTotal),
-        item_discount: itemDiscount,
-        item_subtotal_after_discount: Math.max(
-          0,
-          Math.round(itemTotal - itemDiscount)
-        ),
-      };
+    const result = await orderFacade.createFromCart({
+      userId: req.user.user_id,
+      user: req.user,
+      body: req.body,
+      req,
     });
-
-    const subtotalAfterDiscount = toVnd(totalAmount - discountAmount);
-    const { shipping_fee } = await quoteShipping({
-      province_id,
-      ward_id,
-      subtotal: subtotalAfterDiscount, // nếu service có ngưỡng freeship
-    });
-
-    const finalAmount = toVnd(
-      subtotalAfterDiscount + Number(shipping_fee || 0)
-    );
-
-    // console.log("[amounts]", { totalAmount, discountAmount, finalAmount });
-    // 3) Tạo Order
-    const holdMs = strategy.getReserveHoldMs();
-    const order = await Order.create(
-      {
-        user_id: req.user.user_id,
-        order_code: generateOrderCode(),
-        total_amount: totalAmount,
-        discount_amount: discountAmount,
-        final_amount: finalAmount,
-        status: strategy.getInitialOrderStatus(),
-        shipping_address,
-        shipping_fee,
-        shipping_phone,
-        shipping_name,
-        note: note || "",
-        reserve_expires_at: holdMs ? new Date(Date.now() + holdMs) : null,
-        province_id: province_id || null,
-        ward_id: ward_id || null,
-        geo_lat: geo_lat ?? null,
-        geo_lng: geo_lng ?? null,
-      },
-      { transaction: t }
-    );
-
-    txnRef = strategy.buildTxnRef(order.order_id);
-
-    // 4) Reserve: KHÓA & trừ kho, tạo OrderItem
-    for (const it of itemsForOrder) {
-      const reserveResult = await orderRepository.reserveVariationStock(
-        it.variation_id,
-        it.quantity,
-        t
-      );
-      if (!reserveResult.ok) {
-        await t.rollback();
-        return res
-          .status(reserveResult.status)
-          .json({ message: reserveResult.message });
-      }
-
-      const price = Number(it.variation.price);
-      const pct = Math.max(
-        0,
-        Number(it.variation.product?.discount_percentage || 0)
-      ); // %
-      const itemTotal = price * it.quantity;
-      const itemDiscount = Math.round(((price * pct) / 100) * it.quantity);
-
-      await OrderItem.create(
-        {
-          order_id: order.order_id,
-          variation_id: it.variation_id,
-          quantity: it.quantity,
-          price, // giá gốc / unit
-          discount_amount: itemDiscount, // tổng giảm cho dòng
-          subtotal: Math.max(0, Math.round(itemTotal - itemDiscount)),
-        },
-        { transaction: t }
-      );
-    }
-
-    // 5) Payment record
-    await orderRepository.createPaymentRecord(
-      strategy.buildPaymentRecord({
-        order_id: order.order_id,
-        payment_method,
-        amount: finalAmount,
-        txnRef,
-      }),
-      t
-    );
-
-    // 6) Clear cart (xoá các món đã chọn; nếu không truyền items → xoá toàn bộ)
-    if (Array.isArray(items) && items.length > 0) {
-      const cart = await Cart.findOne({
-        where: { user_id: req.user.user_id },
-        transaction: t,
-      });
-
-      if (cart) {
-        const selectedVariationIds = items
-          .map((it) => Number(it.variation_id))
-          .filter(Boolean);
-
-        if (selectedVariationIds.length > 0) {
-          await CartItem.destroy({
-            where: {
-              cart_id: cart.cart_id,
-              variation_id: selectedVariationIds, // IN (...)
-            },
-            transaction: t,
-          });
-        }
-      }
-    } else {
-      // Không truyền items → checkout toàn bộ giỏ
-      const cart = await Cart.findOne({
-        where: { user_id: req.user.user_id },
-        transaction: t,
-      });
-      if (cart) {
-        await CartItem.destroy({
-          where: { cart_id: cart.cart_id },
-          transaction: t,
-        });
-      }
-    }
-
-    // 7) Payment redirect (VNPAY via strategy; COD → null)
-    let redirect = null;
-    try {
-      const paymentResult = await strategy.afterOrderCreated({
-        order,
-        payment_method,
-        amount: finalAmount,
-        txnRef,
-        req,
-      });
-      redirect = paymentResult.redirect;
-    } catch (e) {
-      await t.rollback();
-      return res
-        .status(502)
-        .json({ message: "VNPAY configuration error", detail: e.message });
-    }
-
-    await t.commit(); 
-      try {
-        console.log(">>> [DEBUG] Bắt đầu quy trình thông báo đơn hàng mới...");
-
-        // Tìm tất cả Admin/Staff để thông báo
-        // Sử dụng Op.or nếu có thể, hoặc liệt kê cả hoa thường để chắc chắn
-        const staffUsers = await User.findAll({
-            attributes: ['user_id'],
-            include: [{
-                model: Role,
-                as: 'Roles', 
-                where: { 
-                    role_name: ['admin', 'staff', 'Admin', 'Staff'] // Thêm case viết hoa cho chắc chắn
-                },
-                required: true
-            }]
-        });
-
-        console.log(`>>> [DEBUG] Tìm thấy ${staffUsers.length} người dùng cần thông báo.`);
-
-        if (staffUsers.length > 0) {
-            const buyerName = req.user.full_name || req.user.username || 'Khách hàng';
-            
-            const notiPromises = staffUsers.map(staff => {
-                return notificationService.createNotification({
-                    userId: staff.user_id, // Quan trọng: Gửi đích danh ID
-                    title: "Đơn hàng mới!",
-                    message: `Khách hàng ${buyerName} vừa đặt đơn #${order.order_code}`,
-                    type: "new_order",
-                    relatedType: "order", 
-                    relatedId: order.order_id
-                });
-            });
-            
-            await Promise.all(notiPromises);
-            console.log(`>>> [DEBUG] Đã gửi thông báo thành công tới ${staffUsers.length} tài khoản.`);
-        } else {
-             console.log(">>> [DEBUG] Cảnh báo: Không tìm thấy Admin/Staff nào trong DB.");
-        }
-    } catch (notifError) {
-        console.error(">>> [DEBUG] Lỗi CHẾT thông báo đơn hàng:", notifError);
-    }
-
-    // Gửi email xác nhận đơn hàng (không block response)
-    try {
-      const { sendOrderConfirmationEmail } = require("../services/emailService");
-      sendOrderConfirmationEmail({
-        order,
-        items_breakdown,
-        payment_provider: payment_provider,
-        payment_method: payment_method,
-      }).catch(err => console.error("Email send failed:", err));
-    } catch (emailError) {
-      console.error("Failed to queue order confirmation email:", emailError);
-    }
-
-    return res.status(201).json({
-      message: "Order created successfully",
-      order: {
-        order_id: order.order_id,
-        order_code: order.order_code,
-        total_amount: order.total_amount,
-        discount_amount: order.discount_amount,
-        final_amount: order.final_amount,
-        status: order.status,
-        shipping_fee, // 👈 phí ship thực
-        items_breakdown,
-      },
-      redirect,
-    });
+    return res.status(result.statusCode).json(result.body);
   } catch (error) {
-    await t.rollback();
-    next(error);
+    return handleFacadeError(error, res, next);
   }
 };
 
@@ -787,99 +413,15 @@ exports.getOrderDetail = async (req, res, next) => {
 
 // Cancel order
 exports.cancelOrder = async (req, res, next) => {
-  const t = await sequelize.transaction();
   try {
-    const { order_id } = req.params;
-    const reason = (req.body?.reason || "").slice(0, 500);
-
-    const orderBundle = await orderRepository.findOrderWithItemsAndPayment(
-      order_id,
-      { userId: req.user.user_id, transaction: t, lockOrder: true }
-    );
-
-    if (!orderBundle) {
-      await t.rollback();
-      return res.status(404).json({ message: "Order not found" });
-    }
-
-    const { order, payment, items } = orderBundle;
-
-    // Guard: với flow của bạn, Payment gần như luôn có.
-    // Nếu đề phòng thiếu, có thể xử lý thêm:
-    if (!payment) {
-      // Vẫn cho hủy COD (edge case), nhưng set logic tối giản.
-    }
-
-    const prov = payment?.provider || "COD"; // 'COD' | 'VNPAY'
-    const pstat = payment?.payment_status; // 'pending' | 'completed' | 'failed' | 'refunded' | undefined
-    const ostat = order.status; // theo enum
-
-    // ====== Kiểm tra điều kiện được hủy ======
-    // 1) Chờ thanh toán:
-    //    - VNPAY: order.AWAITING_PAYMENT + payment.pending
-    const isAwaitingVnpay =
-      prov === "VNPAY" && ostat === "AWAITING_PAYMENT" && pstat === "pending";
-
-    // 2) Chờ giao hàng:
-    //    - COD:   order.processing + payment.pending
-    //    - VNPAY: order.processing + payment.completed
-    const isToShipCOD =
-      prov === "COD" && ostat === "processing" && pstat === "pending";
-    const isToShipVNPAY =
-      prov === "VNPAY" && ostat === "processing" && pstat === "completed";
-
-    if (!(isAwaitingVnpay || isToShipCOD || isToShipVNPAY)) {
-      await t.rollback();
-      return res
-        .status(400)
-        .json({ message: "Order cannot be cancelled in current state." });
-    }
-
-    // ====== Hoàn kho (đơn nào tạo cũng đã reserve kho) ======
-    for (const it of items) {
-      await orderRepository.releaseVariationStock(
-        it.variation_id,
-        it.quantity,
-        t
-      );
-    }
-
-    // ====== Cập nhật trạng thái theo case ======
-    // Order → cancelled
-    await order.update(
-      { status: "cancelled", note: appendNote(order.note, reason) },
-      { transaction: t }
-    );
-
-    // Payment:
-    // - AWAITING_PAYMENT (VNPAY pending): set payment.failed
-    // - To-ship COD (pending):            set payment.failed
-    // - To-ship VNPAY (completed):        set payment.pending (đánh dấu chờ hoàn)
-    if (payment) {
-      if (isAwaitingVnpay || isToShipCOD) {
-        await payment.update(
-          { payment_status: "failed", paid_at: null },
-          { transaction: t }
-        );
-      } else if (isToShipVNPAY) {
-        // Chờ admin hoàn tiền → để "pending" biểu thị refund pending
-        await payment.update({ payment_status: "pending" }, { transaction: t });
-        // Nếu muốn rõ ràng hơn, bạn có thể bổ sung cột riêng như refund_requested_at, refund_note,...
-      }
-    }
-
-    await t.commit();
-    return res.json({
-      message: "Order cancelled successfully",
-      order: {
-        order_id: order.order_id,
-        status: "cancelled",
-        payment_status: payment?.payment_status || null,
-      },
+    const result = await orderFacade.cancelOrder({
+      userId: req.user.user_id,
+      orderId: req.params.order_id,
+      reason: req.body?.reason,
     });
-  } catch (err) {
-    await t.rollback();
-    next(err);
+    return res.status(result.statusCode).json(result.body);
+  } catch (error) {
+    return handleFacadeError(error, res, next);
   }
 };
 
@@ -1270,115 +812,18 @@ exports.getOrderCountersV2 = async (req, res, next) => {
 };
 
 exports.changePaymentMethod = async (req, res, next) => {
-  const t = await sequelize.transaction();
   try {
-    const { order_id } = req.params;
     const { provider, method } = req.body || {};
-
-    let strategy;
-    try {
-      strategy = getStrategy(provider);
-      strategy.validateMethod(method, "changePayment");
-    } catch (err) {
-      if (err.status) {
-        await t.rollback();
-        return res.status(err.status).json({ message: err.message });
-      }
-      throw err;
-    }
-
-    // Lock order & payment
-    const order = await Order.findOne({
-      where: { order_id, user_id: req.user.user_id },
-      transaction: t,
-      lock: t.LOCK.UPDATE,
+    const result = await orderFacade.changePaymentMethod({
+      userId: req.user.user_id,
+      orderId: req.params.order_id,
+      provider,
+      method,
+      req,
     });
-    if (!order) {
-      await t.rollback();
-      return res.status(404).json({ message: "Order not found" });
-    }
-
-    // chặn các trạng thái không cho đổi
-    if (["shipping", "delivered", "cancelled"].includes(order.status)) {
-      await t.rollback();
-      return res.status(400).json({ message: "Cannot change payment in current state." });
-    }
-
-    const payment = await Payment.findOne({
-      where: { order_id: order.order_id },
-      transaction: t,
-      lock: t.LOCK.UPDATE,
-    });
-    if (!payment) {
-      await t.rollback();
-      return res.status(400).json({ message: "Payment record not found" });
-    }
-
-    if (payment.payment_status === "completed") {
-      await t.rollback();
-      return res.status(400).json({ message: "Payment already completed; cannot change method." });
-    }
-
-    let redirect = null;
-    try {
-      const changeResult = await strategy.applyChangePayment({
-        order,
-        payment,
-        method,
-        req,
-        transaction: t,
-      });
-      redirect = changeResult.redirect;
-    } catch (e) {
-      await t.rollback();
-      return res
-        .status(502)
-        .json({ message: "VNPAY configuration error", detail: e.message });
-    }
-
-    await t.commit();
-
-    // Gửi email thông báo thay đổi phương thức thanh toán
-    try {
-      const { sendOrderUpdateEmail } = require("../services/emailService");
-      const { User } = require('../models');
-      const user = await User.findByPk(order.user_id);
-
-      if (user) {
-        sendOrderUpdateEmail({
-          order,
-          changeType: 'PAYMENT_METHOD',
-          oldData: {
-            provider: payment._previousDataValues?.provider,
-            method: payment._previousDataValues?.payment_method,
-          },
-          newData: {
-            provider: payment.provider,
-            method: payment.payment_method,
-          },
-          user
-        }).catch(err => console.error("Payment method update email failed:", err));
-      }
-    } catch (emailError) {
-      console.error("Failed to queue payment method update email:", emailError);
-    }
-
-    return res.json({
-      message: "Payment method updated",
-      order: {
-        order_id: order.order_id,
-        status: order.status,
-      },
-      payment: {
-        provider: provider,
-        method,
-        status: provider === "COD" ? "pending" : "pending",
-      },
-      redirect, // chỉ có khi VNPAY
-    });
-  } catch (err) {
-    await t.rollback();
-    next(err);
+    return res.status(result.statusCode).json(result.body);
+  } catch (error) {
+    return handleFacadeError(error, res, next);
   }
 };
 
