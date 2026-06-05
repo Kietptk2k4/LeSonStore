@@ -277,9 +277,125 @@ async function listUserOrders({ userId, query }) {
   };
 }
 
+function buildOrderDetailIncludes({ sortItems = false } = {}) {
+  const query = {
+    include: [
+      {
+        model: OrderItem,
+        as: "items",
+        include: [
+          {
+            model: ProductVariation,
+            as: "variation",
+            include: [{ model: Product, as: "product" }],
+          },
+        ],
+      },
+      { model: Payment, as: "payment" },
+    ],
+  };
+
+  if (sortItems) {
+    query.order = [
+      [{ model: OrderItem, as: "items" }, "order_item_id", "ASC"],
+    ];
+  }
+
+  return query;
+}
+
+/**
+ * GET /api/orders/:order_id — full detail (raw Sequelize entity)
+ * @returns {Order|null}
+ */
+async function getOrderDetailById({ userId, orderId }) {
+  return Order.findOne({
+    where: {
+      order_id: orderId,
+      user_id: userId,
+    },
+    ...buildOrderDetailIncludes(),
+  });
+}
+
+/**
+ * Map order JSON → slim DTO (no reserve_expires_at, no note)
+ */
+function mapOrderDetailSlim(o) {
+  const items = (o.items || []).map((it) => {
+    const p = it.variation?.product || {};
+    const thumb = p.images?.[0]?.image_url || p.thumbnail_url || null;
+
+    return {
+      order_item_id: it.order_item_id,
+      variation_id: it.variation_id,
+      quantity: Number(it.quantity || 0),
+      price: Number(it.price || 0),
+      discount_amount: Number(it.discount_amount || 0),
+      subtotal: Number(it.subtotal || 0),
+      product: {
+        product_id: p.product_id || null,
+        product_name: p.product_name || null,
+        thumbnail_url: thumb,
+        slug: p.slug || null,
+      },
+    };
+  });
+
+  const pay = o.payment
+    ? {
+        provider: o.payment.provider,
+        payment_method: o.payment.payment_method,
+        payment_status: o.payment.payment_status,
+        amount: Number(o.payment.amount || 0),
+        txn_ref: o.payment.txn_ref,
+        paid_at: o.payment.paid_at,
+      }
+    : null;
+
+  return {
+    order_id: o.order_id,
+    order_code: o.order_code,
+    status: o.status,
+    total_amount: Number(o.total_amount || 0),
+    discount_amount: Number(o.discount_amount || 0),
+    final_amount: Number(o.final_amount || 0),
+    shipping_fee: Number(o.shipping_fee || 0),
+    shipping_name: o.shipping_name,
+    shipping_phone: o.shipping_phone,
+    shipping_address: o.shipping_address,
+    province_id: o.province_id,
+    ward_id: o.ward_id,
+    geo_lat: o.geo_lat ? Number(o.geo_lat) : null,
+    geo_lng: o.geo_lng ? Number(o.geo_lng) : null,
+    created_at: o.created_at,
+    payment: pay,
+    items,
+  };
+}
+
+/**
+ * GET /api/orders/:order_id/slim
+ * @returns {{ order: object }|null}
+ */
+async function getOrderDetailSlim({ userId, orderId }) {
+  const orderRow = await Order.findOne({
+    where: { order_id: orderId, user_id: userId },
+    ...buildOrderDetailIncludes({ sortItems: true }),
+  });
+
+  if (!orderRow) return null;
+
+  return { order: mapOrderDetailSlim(orderRow.toJSON()) };
+}
+
 module.exports = {
   parseListQuery,
   mapOrderListRow,
   listUserOrdersV2,
   listUserOrders,
+  buildOrderDetailIncludes,
+  getOrderDetailById,
+  getOrderDetailSlim,
+  mapOrderDetailSlim,
 };

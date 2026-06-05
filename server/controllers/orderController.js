@@ -1,11 +1,6 @@
 const {
   Order,
-  OrderItem,
-  Cart,
-  CartItem,
-  ProductVariation,
   Payment,
-  Product,
   User,
 } = require("../models");
 const orderFacade = require("../services/order/orderFacade");
@@ -65,40 +60,18 @@ exports.getUserOrders = async (req, res, next) => {
   }
 };
 
-// Get order detail
 exports.getOrderDetail = async (req, res, next) => {
   try {
-    const { order_id } = req.params;
-
-    const order = await Order.findOne({
-      where: {
-        order_id,
-        user_id: req.user.user_id,
-      },
-      include: [
-        {
-          model: OrderItem,
-          as: "items",
-          include: [
-            {
-              model: ProductVariation,
-              as: "variation",
-              include: [{ model: Product, as: "product" }], // ✅ alias đúng
-            },
-          ],
-        },
-        {
-          model: Payment,
-          as: "payment",
-        },
-      ],
+    const order = await orderQueryService.getOrderDetailById({
+      userId: req.user.user_id,
+      orderId: req.params.order_id,
     });
 
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    res.json({ order });
+    return res.json({ order });
   } catch (error) {
     next(error);
   }
@@ -130,90 +103,18 @@ exports.previewOrder = async (req, res, next) => {
 
 exports.getOrderDetailSlim = async (req, res, next) => {
   try {
-    const { order_id } = req.params;
-
-    const orderRow = await Order.findOne({
-      where: { order_id, user_id: req.user.user_id },
-      include: [
-        {
-          model: OrderItem,
-          as: "items",
-          include: [
-            {
-              model: ProductVariation,
-              as: "variation",
-              include: [{ model: Product, as: "product" }],
-            },
-          ],
-        },
-        { model: Payment, as: "payment" },
-      ],
-      order: [[{ model: OrderItem, as: "items" }, "order_item_id", "ASC"]],
+    const result = await orderQueryService.getOrderDetailSlim({
+      userId: req.user.user_id,
+      orderId: req.params.order_id,
     });
 
-    if (!orderRow) return res.status(404).json({ message: "Order not found" });
+    if (!result) {
+      return res.status(404).json({ message: "Order not found" });
+    }
 
-    const o = orderRow.toJSON();
-
-    // Chuẩn hóa items
-    const items = (o.items || []).map((it) => {
-      const p = it.variation?.product || {};
-      // thumbnail ưu tiên ảnh primary nếu bạn có; ở đây lấy thumbnail_url đã có
-      const thumb = p.images?.[0]?.image_url || p.thumbnail_url || null;
-
-      return {
-        order_item_id: it.order_item_id,
-        variation_id: it.variation_id,
-        quantity: Number(it.quantity || 0),
-        price: Number(it.price || 0),
-        discount_amount: Number(it.discount_amount || 0),
-        subtotal: Number(it.subtotal || 0),
-        product: {
-          product_id: p.product_id || null,
-          product_name: p.product_name || null,
-          thumbnail_url: thumb,
-          slug: p.slug || null,
-        },
-      };
-    });
-
-    // Chuẩn hóa payment
-    const pay = o.payment
-      ? {
-          provider: o.payment.provider,
-          payment_method: o.payment.payment_method,
-          payment_status: o.payment.payment_status,
-          amount: Number(o.payment.amount || 0),
-          txn_ref: o.payment.txn_ref,
-          paid_at: o.payment.paid_at,
-        }
-      : null;
-
-    const payload = {
-      order: {
-        order_id: o.order_id,
-        order_code: o.order_code,
-        status: o.status,
-        total_amount: Number(o.total_amount || 0),
-        discount_amount: Number(o.discount_amount || 0),
-        final_amount: Number(o.final_amount || 0),
-        shipping_fee: Number(o.shipping_fee || 0),
-        shipping_name: o.shipping_name,
-        shipping_phone: o.shipping_phone,
-        shipping_address: o.shipping_address,
-        province_id: o.province_id,
-        ward_id: o.ward_id,
-        geo_lat: o.geo_lat ? Number(o.geo_lat) : null,
-        geo_lng: o.geo_lng ? Number(o.geo_lng) : null,
-        created_at: o.created_at,
-        payment: pay,
-        items,
-      },
-    };
-
-    return res.json(payload);
-  } catch (err) {
-    next(err);
+    return res.json(result);
+  } catch (error) {
+    next(error);
   }
 };
 

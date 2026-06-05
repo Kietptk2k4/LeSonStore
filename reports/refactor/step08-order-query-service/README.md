@@ -2,7 +2,7 @@
 
 **Dự án:** LeSonStore  
 **Ngày:** 05/06/2026  
-**Trạng thái:** Hoàn thành — tests `viewUserOrders`, `orderPaymentCountdownBe`
+**Trạng thái:** Hoàn thành — tests list + detail (`viewUserOrders`, `viewOrderDetail`, `viewOrderDetailSlim`, `orderPaymentCountdownBe`)
 
 ---
 
@@ -28,8 +28,19 @@ Tách **read** (danh sách đơn) khỏi **write** (`orderFacade`). Module `orde
 
 ## API
 
+### List (C4)
+
 - Production: `GET /api/orders` → `getUserOrdersV2` → `listUserOrdersV2`
 - Legacy: `getUserOrders` → `listUserOrders` (export giữ, không mount route)
+
+### Detail (C5)
+
+| Method | Route | Trả về |
+|--------|-------|--------|
+| `getOrderDetailById` | `GET /api/orders/:order_id` | Entity Sequelize raw (`{ order }`) |
+| `getOrderDetailSlim` | `GET /api/orders/:order_id/slim` | DTO `mapOrderDetailSlim` — không `reserve_expires_at`, không `note` |
+
+Helper: `buildOrderDetailIncludes({ sortItems })` — includes items→variation→product + payment.
 
 ## Khác biệt V2 vs Legacy
 
@@ -44,7 +55,7 @@ Tách **read** (danh sách đơn) khỏi **write** (`orderFacade`). Module `orde
 
 ```bash
 cd server
-npm test -- __tests__/orders/viewUserOrders.test.js __tests__/orders/orderPaymentCountdownBe.test.js
+npm test -- __tests__/orders/viewUserOrders.test.js __tests__/orders/viewOrderDetail.test.js __tests__/orders/viewOrderDetailSlim.test.js __tests__/orders/orderPaymentCountdownBe.test.js
 ```
 
 ## Liên quan
