@@ -9,7 +9,7 @@
 | `order.cancelled` | `orderFacade.cancelOrder` | *(chưa có listener — reserved)* | — |
 | `order.refunded` | `refundService.processAdminRefund` | `orderEmailListener` | `sendOrderUpdateEmail` ORDER_REFUND |
 | `order.shipping_address.changed` | `orderFacade.updateShippingAddress` (sau commit) | `orderEmailListener` | `sendOrderUpdateEmail` SHIPPING_ADDRESS |
-| `payment.completed` | `vnpayController.vnpayReturn` (khi `updated === true`) | `orderPaymentCompletedListener` | User `payment_success` + staff `payment_received` |
+| `payment.completed` | `vnpayReturnService.handleVnpayReturn` (khi `updated === true`) | `orderPaymentCompletedListener` | User `payment_success` + staff `payment_received` |
 
 ## Quy tắc
 

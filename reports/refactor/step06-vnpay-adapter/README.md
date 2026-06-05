@@ -24,14 +24,17 @@
 | `server/services/gateways/vnpayGateway.js` | **Adapter** — `createPaymentUrl` → `getPaymentUrl`; `verifyCallback` → `verifyReturnUrl` |
 | `server/services/gateways/paymentGatewayContract.js` | JSDoc `@typedef PaymentGateway` (tài liệu hóa contract, không runtime) |
 | `server/services/payment/vnpayStrategy.js` | **Client** Strategy — chỉ `require` gateway, không crypto |
-| `server/controllers/vnpayController.js` | HTTP — `createPayment`, `vnpayReturn` qua gateway + strategy |
+| `server/controllers/vnpayController.js` | Thin HTTP (D2) → `vnpayPaymentService`, `vnpayReturnService` |
+| `server/services/payment/vnpayReturnService.js` | Return URL orchestration (D2) |
+| `server/services/payment/vnpayPaymentService.js` | Ad-hoc payment URL (D2) |
 
 ## Audit import `vnpayService` (production)
 
 Chỉ **`vnpayGateway.js`** import trực tiếp `vnpayService` trong luồng runtime:
 
 ```
-vnpayStrategy / vnpayController → vnpayGateway → vnpayService
+vnpayStrategy / vnpayPaymentService → vnpayGateway → vnpayService
+vnpayReturnService → vnpayGateway + vnpayStrategy
 ```
 
 Ngoại lệ hợp lệ: `__tests__/`, `scripts/` (mock hoặc báo cáo unit test).
