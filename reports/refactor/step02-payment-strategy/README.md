@@ -56,4 +56,5 @@ npm test -- __tests__/orders/createOrder.test.js __tests__/orders/vnpayPaymentIn
 ## Liên quan
 
 - [Bước 1 — Repository](../step01-repository/README.md)
+- [Bước 6 — Adapter VNPay (formalize gateway)](../step06-vnpay-adapter/README.md)
 - [Bước 0 — Pattern hiện hữu](../../already_done/design-patterns-step0.md)

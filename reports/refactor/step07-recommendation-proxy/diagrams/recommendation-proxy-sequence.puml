@@ -1,0 +1,49 @@
+@startuml recommendation_proxy_sequence_step07
+title LeSonStore — Bước 7: Proxy recommendation (sequence)
+
+actor Client as FE
+participant "productController\ngetRecommendedByVariation" as Ctrl
+participant "recommendationProxy\n<<Proxy>>" as Proxy
+participant "Flask KNN\n:8000/recommend" as Flask
+database "PostgreSQL\nproducts + images" as DB
+
+FE -> Ctrl : GET /api/products/variations/:id/recommendations
+activate Ctrl
+
+Ctrl -> Ctrl : validate variation_id
+
+Ctrl -> Proxy : getRecommendations(variationId)
+activate Proxy
+Proxy -> Flask : GET /recommend?variation_id=
+activate Flask
+
+alt HTTP 2xx
+  Flask --> Proxy : JSON (items / debug / array)
+  deactivate Flask
+  Proxy --> Ctrl : payload
+  deactivate Proxy
+
+  Ctrl -> Ctrl : parse shape, dedupe by product_id
+  Ctrl -> DB : fetchProductMeta(productIds)
+  activate DB
+  DB --> Ctrl : slug, thumbnail, rating
+  deactivate DB
+  Ctrl -> Ctrl : map FE shape, sort by score
+  Ctrl --> FE : 200 { products, basedOn, source: knn }
+
+else upstream status >= 400
+  Flask --> Proxy : 4xx/5xx + body
+  deactivate Flask
+  Proxy --> Ctrl : throw RecommendationUpstreamError
+  deactivate Proxy
+  Ctrl --> FE : 502 upstream_{status}, products: []
+
+else network / timeout
+  Proxy --> Ctrl : throw RecommendationAdapterError
+  deactivate Proxy
+  Ctrl --> FE : 502 adapter_exception, products: []
+end
+
+deactivate Ctrl
+
+@enduml

@@ -1,0 +1,48 @@
+@startuml vnpay_adapter_class_step06
+title LeSonStore — Bước 6: Adapter VNPay
+
+skinparam classAttributeIconSize 0
+
+interface "PaymentGateway\n(contract)" as IGateway {
+  +createPaymentUrl(params): Promise<string>
+  +verifyCallback(query): { isSuccess, vnp_Params }
+}
+
+class "vnpayGateway.js\n<<Adapter>>" as Gateway {
+  +createPaymentUrl(params)
+  +verifyCallback(query)
+}
+
+class "vnpayService.js\n<<Adaptee>>" as Adaptee {
+  +getPaymentUrl(params)
+  +verifyReturnUrl(query)
+  -sortObject()
+  -HMAC SHA512
+}
+
+class "vnpayStrategy.js\n<<Client>>" as Strategy {
+  +buildPaymentRedirect()
+  +afterOrderCreated()
+  +applySuccessfulReturn()
+}
+
+class "vnpayController.js" as Ctrl {
+  +createPayment()
+  +vnpayReturn()
+}
+
+cloud "VNPay API\n(sandbox / production)" as VNPay {
+}
+
+Strategy --> IGateway : uses
+Ctrl --> IGateway : uses
+Gateway ..|> IGateway : implements
+Gateway --> Adaptee : adapts
+Adaptee --> VNPay : redirect URL /\nreturn query
+
+note right of Gateway
+  Thin wrapper — không đổi HMAC
+  Bước 2 tạo file; Bước 6 formalize
+end note
+
+@enduml

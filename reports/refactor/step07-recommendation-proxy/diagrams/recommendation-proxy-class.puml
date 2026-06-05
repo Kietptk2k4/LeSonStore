@@ -1,0 +1,54 @@
+@startuml recommendation_proxy_class_step07
+title LeSonStore — Bước 7: Proxy recommendation (class)
+
+skinparam classAttributeIconSize 0
+
+class "productController.js" as Ctrl {
+  +getRecommendedByVariation(req, res)
+  -fetchProductMeta(productIds)
+}
+
+class "recommendationProxy.js\n<<Proxy>>" as Proxy {
+  +getRecommendations(variationId, options)
+  +BASE
+  +TIMEOUT
+}
+
+class "RecommendationUpstreamError" as UpErr {
+  +upstreamStatus
+  +upstream
+}
+
+class "RecommendationAdapterError" as AdErr {
+  +code
+  +base
+}
+
+class "Axios" as Axios {
+  +get(url, config)
+}
+
+class "FlaskKNNService\n<<RealSubject>>" as Flask {
+  +GET /recommend
+}
+
+database "PostgreSQL" as DB
+
+Ctrl --> Proxy : getRecommendations()
+Proxy --> Axios : HTTP GET
+Axios --> Flask : /recommend
+Proxy ..> UpErr : throws
+Proxy ..> AdErr : throws
+Ctrl --> DB : enrich metadata
+
+note bottom of Proxy
+  validateStatus: () => true
+  RECO_API_BASE, RECO_TIMEOUT_MS
+end note
+
+note right of Ctrl
+  Không import axios
+  Presentation + BFF enrich
+end note
+
+@enduml
