@@ -121,6 +121,22 @@ Luồng `POST /api/orders/preview` — **read-only**, không transaction, không
 
 ---
 
+## `updateShippingAddress({ userId, orderId, body })`
+
+Luồng `PUT /api/orders/:order_id/shipping-address`.
+
+| Bước | Hành vi |
+|------|---------|
+| Lock | transaction + `LOCK.UPDATE` |
+| Validate | status không ∈ shipping/delivered/cancelled; `province_id` |
+| Ship | `quoteShipping` → có thể chặn VNPAY completed + đổi phí |
+| Persist | `order.update`, `payment.update` nếu chưa completed |
+| Event | `emitOrderEvent("order.shipping_address.changed")` **sau commit** |
+
+**Return:** `{ statusCode: 200, body: { message, order: { … } } }`
+
+---
+
 ## `retryVnpayPayment({ userId, orderId, method, req })`
 
 Luồng `POST /api/orders/:order_id/payments/retry` — VNPAY only.

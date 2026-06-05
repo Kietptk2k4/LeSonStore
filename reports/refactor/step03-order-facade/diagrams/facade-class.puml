@@ -9,6 +9,7 @@ class "orderController.js\n(thin handlers)" as Ctrl {
   +changePaymentMethod(req, res, next)
   +previewOrder(req, res, next)
   +retryVnpayPayment(req, res, next)
+  +updateShippingAddress(req, res, next)
   ..other exports unchanged..
   +getUserOrdersV2(...)
 }
@@ -19,6 +20,7 @@ class "orderFacade.js" as Facade {
   +changePaymentMethod({ userId, orderId, provider, method, req })
   +previewOrder({ body })
   +retryVnpayPayment({ userId, orderId, method, req })
+  +updateShippingAddress({ userId, orderId, body })
 }
 
 class "paymentStrategy.js\ngetStrategy" as Strategy
@@ -32,7 +34,7 @@ class "orderPaymentMethodChangedListener.js" as L2
 
 database "PostgreSQL\n(Sequelize)" as DB
 
-Ctrl --> Facade : create, cancel, change payment,\npreview, retry VNPAY
+Ctrl --> Facade : create, cancel, change payment,\npreview, retry, update shipping
 Facade --> Strategy : validate, afterOrderCreated,\napplyChangePayment, applyRetryPayment
 Facade --> Repo : reserve, payment, find bundle
 Facade --> DB : Order, OrderItem, Cart, ...

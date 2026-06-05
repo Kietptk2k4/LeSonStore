@@ -8,11 +8,8 @@ const {
   Product,
   User,
 } = require("../models");
-const sequelize = require("../config/database");
 const { Op } = require("sequelize");
-const { quoteShipping } = require("../services/shippingService");
 const orderFacade = require("../services/order/orderFacade");
-const { emitOrderEvent } = require("../events/orderEventBus");
 const { getIO } = require("../config/socket")
 const toVnd = (x) => Math.max(0, Math.round(Number(x) || 0));
 
@@ -678,142 +675,14 @@ exports.changePaymentMethod = async (req, res, next) => {
 };
 
 exports.updateShippingAddress = async (req, res, next) => {
-  const t = await sequelize.transaction();
   try {
-    const { order_id } = req.params;
-    const {
-      shipping_name,
-      shipping_phone,
-      shipping_address,
-      province_id,
-      ward_id,
-      geo_lat,
-      geo_lng,
-    } = req.body || {};
-
-    const order = await Order.findOne({
-      where: { order_id, user_id: req.user.user_id },
-      transaction: t,
-      lock: t.LOCK.UPDATE,
+    const result = await orderFacade.updateShippingAddress({
+      userId: req.user.user_id,
+      orderId: req.params.order_id,
+      body: req.body,
     });
-    if (!order) {
-      await t.rollback();
-      return res.status(404).json({ message: "Order not found" });
-    }
-
-    if (["shipping", "delivered", "cancelled"].includes(order.status)) {
-      await t.rollback();
-      return res.status(400).json({ message: "Cannot change shipping address in current state." });
-    }
-
-    const payment = await Payment.findOne({
-      where: { order_id: order.order_id },
-      transaction: t,
-      lock: t.LOCK.UPDATE,
-    });
-
-    // Tính lại phí ship nếu có province/ward mới (nếu không truyền, dùng cũ)
-    const newProvinceId = province_id ?? order.province_id;
-    const newWardId = ward_id ?? order.ward_id;
-
-    if (!newProvinceId) {
-      await t.rollback();
-      return res.status(400).json({ message: "province_id is required (current or new)" });
-    }
-
-    const subtotal = Math.max(
-      0,
-      Number(order.total_amount || 0) - Number(order.discount_amount || 0)
-    );
-
-    const { shipping_fee: newShipFee } = await quoteShipping({
-      province_id: Number(newProvinceId),
-      ward_id: newWardId ? Number(newWardId) : null,
-      subtotal,
-    });
-
-    const oldShipFee = Number(order.shipping_fee || 0);
-    const willChangeAmount = Number(newShipFee) !== oldShipFee;
-
-    console.log('updateShippingAddress debug:', {
-      orderId: order.order_id,
-      paymentProvider: payment?.provider,
-      paymentStatus: payment?.payment_status,
-      oldShipFee,
-      newShipFee,
-      willChangeAmount
-    });
-
-    if (payment?.provider === "VNPAY" && payment?.payment_status === "completed" && willChangeAmount) {
-      await t.rollback();
-      return res.status(400).json({
-        message: "Cập nhật địa chỉ thất bại. Đơn hàng đã thanh toán VNPAY và phí ship sẽ thay đổi. Liên hệ hỗ trợ để xử lý hoàn tiền/phụ thu.",
-      });
-    }
-
-    const oldData = {
-      shipping_name: order.shipping_name,
-      shipping_phone: order.shipping_phone,
-      shipping_address: order.shipping_address,
-    };
-
-    // Cập nhật đơn
-    const patch = {
-      shipping_name: shipping_name ?? order.shipping_name,
-      shipping_phone: shipping_phone ?? order.shipping_phone,
-      shipping_address: shipping_address ?? order.shipping_address,
-      province_id: newProvinceId,
-      ward_id: newWardId,
-      geo_lat: geo_lat ?? order.geo_lat,
-      geo_lng: geo_lng ?? order.geo_lng,
-      shipping_fee: newShipFee,
-      final_amount: Math.max(0, subtotal + Number(newShipFee || 0)),
-    };
-
-    await order.update(patch, { transaction: t });
-
-    // Đồng bộ số tiền ở Payment nếu chưa paid (pending/failed/refunded)
-    if (payment && payment.payment_status !== "completed") {
-      console.log('Updating payment amount to:', Number(order.final_amount || patch.final_amount || 0));
-      await payment.update(
-        { amount: Number(order.final_amount || patch.final_amount || 0) },
-        { transaction: t }
-      );
-    }
-
-    await t.commit();
-
-    const newData = {
-      shipping_name: order.shipping_name,
-      shipping_phone: order.shipping_phone,
-      shipping_address: order.shipping_address,
-    };
-    emitOrderEvent("order.shipping_address.changed", {
-      order,
-      oldData,
-      newData,
-      userId: order.user_id,
-    });
-
-    console.log('updateShippingAddress success for order:', order.order_id);
-    return res.json({
-      message: "Shipping address updated",
-      order: {
-        order_id: order.order_id,
-        shipping_name: order.shipping_name,
-        shipping_phone: order.shipping_phone,
-        shipping_address: order.shipping_address,
-        province_id: order.province_id,
-        ward_id: order.ward_id,
-        geo_lat: order.geo_lat,
-        geo_lng: order.geo_lng,
-        shipping_fee: Number(order.shipping_fee || newShipFee || 0),
-        final_amount: Number(order.final_amount || patch.final_amount || 0),
-      },
-    });
-  } catch (err) {
-    await t.rollback();
-    console.error('updateShippingAddress error:', err.message);
-    next(err);
+    return res.status(result.statusCode).json(result.body);
+  } catch (error) {
+    return handleFacadeError(error, res, next);
   }
 };
