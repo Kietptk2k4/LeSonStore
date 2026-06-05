@@ -7,7 +7,7 @@ const {
   emitStatusChanged,
 } = require("../services/order/orderStateMachine")
 const { registerOrderListeners } = require("../events/listeners")
-const { emitOrderEvent } = require("../events/orderEventBus")
+const refundService = require("../services/order/refundService")
 
 registerOrderListeners()
 
@@ -538,38 +538,17 @@ exports.deliverOrder = async (req, res, next) => {
 // Refund order (for cancelled VNPAY orders)
 exports.refundOrder = async (req, res, next) => {
   try {
-    const { order_id } = req.params
-
-    const order = await Order.findByPk(order_id, {
-      include: [{ model: Payment, as: 'payment' }]
-    })
-    if (!order) {
-      return res.status(404).json({ message: "Order not found" })
+    const result = await refundService.processAdminRefund({
+      orderId: req.params.order_id,
+    });
+    return res.json(result);
+  } catch (err) {
+    if (err.status) {
+      return res.status(err.status).json({ message: err.message });
     }
-
-    if (order.status !== 'cancelled') {
-      return res.status(400).json({ message: "Order must be cancelled to refund" })
-    }
-
-    if (order.payment?.provider !== 'VNPAY') {
-      return res.status(400).json({ message: "Only VNPAY orders can be refunded through admin" })
-    }
-
-    // Update payment status to indicate refund processed
-    if (order.payment) {
-      await order.payment.update({ payment_status: 'refunded' })
-    }
-
-    emitOrderEvent("order.refunded", { order, payment: order.payment })
-
-    res.json({
-      message: "Order refunded successfully",
-      order,
-    })
-  } catch (error) {
-    next(error)
+    next(err);
   }
-}
+};
 
 // User Management
 exports.getAllUsers = async (req, res, next) => {
