@@ -8,14 +8,15 @@
 
 ## Mục đích
 
-Tách gọi HTTP sang **Recommendation Service** (Flask/KNN) khỏi `productController.js` bằng **Proxy pattern** (`recommendationProxy.js`). Controller giữ trách nhiệm **presentation/enrich** (dedupe, metadata DB, map JSON cho FE).
+Tách gọi HTTP sang **Recommendation Service** (Flask/KNN) bằng **Proxy pattern** (`recommendationProxy.js`). Enrich/map FE chuyển sang **`recommendationService`** (E5 — xem [Bước 14](../step14-recommendation-service/README.md)).
 
 ## Phân tách trách nhiệm
 
 | Lớp | Việc |
 |-----|------|
 | **Proxy** (`recommendationProxy.js`) | `GET /recommend?variation_id=`, timeout, `validateStatus`, map lỗi → `RecommendationUpstreamError` / `RecommendationAdapterError` |
-| **Controller** (`getRecommendedByVariation`) | Parse `items` / `debug` / array, dedupe theo `product_id`, `fetchProductMeta`, map field FE, sort score, HTTP 502 response |
+| **Application** (`recommendationService.js`) | Parse `items` / `debug` / array, dedupe, `fetchProductMeta`, map FE, sort, `{ statusCode, body }` |
+| **Controller** (`getRecommendedByVariation`) | HTTP adapter → `recommendationService.getByVariation` |
 
 ## Phụ thuộc
 
@@ -27,7 +28,8 @@ Tách gọi HTTP sang **Recommendation Service** (Flask/KNN) khỏi `productCont
 | File | Vai trò |
 |------|---------|
 | `server/services/recommendationProxy.js` | Proxy — `getRecommendations`, error classes, `BASE`, `TIMEOUT` |
-| `server/controllers/productController.js` | BFF — `getRecommendedByVariation`, `fetchProductMeta` |
+| `server/services/recommendation/recommendationService.js` | Orchestration + DB enrich (E5) |
+| `server/controllers/productController.js` | HTTP — `getRecommendedByVariation` |
 | `recommendation_service/` (Flask) | Real subject — KNN `/recommend` |
 
 ## Biến môi trường

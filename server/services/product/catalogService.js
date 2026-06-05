@@ -11,12 +11,6 @@ const {
   User,
 } = require("../../models");
 const { Op, Sequelize } = require("sequelize");
-const recommendationProxy = require("../recommendationProxy");
-const {
-  RecommendationUpstreamError,
-  RecommendationAdapterError,
-  BASE,
-} = recommendationProxy;
 
 function throwHttp(status, message, payload) {
   const err = new Error(message);
@@ -553,165 +547,6 @@ async function getSearchSuggestions(q) {
   }
 }
 
-async function fetchProductMeta(productIds = []) {
-  if (!productIds.length) return {};
-
-  const rows = await Product.findAll({
-    where: { product_id: { [Op.in]: productIds } },
-    attributes: [
-      "product_id",
-      // đổi "product_name" thành "name" nếu model của bạn map field -> name
-      "product_name",
-      "slug",
-      "rating_average",
-      "thumbnail_url",
-    ],
-    include: [
-      {
-        model: ProductImage,
-        as: "images",
-        required: false,
-        attributes: ["image_url", "is_primary", "display_order"],
-      },
-    ],
-    order: [
-      [{ model: ProductImage, as: "images" }, "is_primary", "DESC"],
-      [{ model: ProductImage, as: "images" }, "display_order", "ASC"],
-    ],
-  });
-
-  const map = {};
-  for (const r of rows) {
-    const j = r.toJSON();
-    const img = j.images?.[0];
-    map[j.product_id] = {
-      product_name: j.product_name,              // hoặc j.name nếu model đặt alias
-      slug: j.slug,
-      thumbnail_url: j.thumbnail_url || null,    // ← ưu tiên thumbnail_url từ products
-      image: j.thumbnail_url || img?.image_url || null, // fallback sang ảnh primary
-      rating_average: j.rating_average || null,
-    };
-  }
-  return map;
-}
-
-async function getRecommendationsByVariation(variationId) {
-  const vid = Number(variationId);
-  if (!vid) return { statusCode: 400, body: { products: [], error: "invalid variation_id" } };
-
-  try {
-    const payload = await recommendationProxy.getRecommendations(vid);
-
-    // ---- HỖ TRỢ NHIỀU KIỂU SHAPE ----
-    // 1) Chuẩn: { items: [...] }
-    // 2) Debug mode bạn đang có: { debug: [...] }
-    // 3) Hiếm gặp: payload là một mảng luôn
-    let raw = Array.isArray(payload?.items)
-      ? payload.items
-      : Array.isArray(payload?.debug)
-      ? payload.debug
-      : Array.isArray(payload)
-      ? payload
-      : [];
-
-    // (tuỳ chọn) Gộp trùng theo product_id → giữ biến thể có score cao nhất
-    // score mặc định lấy performance_score nếu có, rơi về 0
-    const bestByProduct = new Map();
-    for (const it of raw) {
-      const pid = it.product_id ?? it.id;
-      const score =
-        it.score ??
-        it.performance_score ??
-        it.rank_score ??
-        0;
-
-      const prev = bestByProduct.get(pid);
-      if (!prev || score > prev._score) {
-        bestByProduct.set(pid, { ...it, _score: score });
-      }
-    }
-    raw = Array.from(bestByProduct.values());
-
-    // Lấy meta từ DB cho các product_id (ảnh, slug, name)
-    const productIds = raw.map((x) => x.product_id).filter(Boolean);
-    const metaMap = await fetchProductMeta(productIds);
-
-    // Map về shape FE cần
-    const products = raw.map((it) => {
-      const meta = metaMap[it.product_id] || {};
-      return {
-        id: it.product_id,                    // FE card link theo product
-        variation_id: it.variation_id,        // để deep-link ?v= nếu muốn
-        name: meta.product_name || it.product_name,   // ưu tiên DB -> rơi về từ Flask
-        image: meta.thumbnail_url,                    // ưu tiên ảnh DB (ổn định)
-        slug: meta.slug,
-        price: it.price,
-        score: it.score ?? it.performance_score ?? null,
-        rating_average: meta.rating_average,
-        // (tuỳ) thêm nguồn giải thích:
-        explain: {
-          source: it.source,                  // "fresh" / "indexed"
-          score_source: it.score_source,      // "fresh:benchmark", ...
-          cpu_source: it.cpu_source,
-          gpu_source: it.gpu_source,
-        },
-      };
-    });
-
-    // Sắp xếp theo score giảm dần (nếu có)
-    products.sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
-
-    return {
-      statusCode: 200,
-      body: {
-        products,
-        basedOn: { variationId: vid },
-        generated_at: payload.generated_at || new Date().toISOString(),
-        source: "knn",
-      },
-    };
-  } catch (e) {
-    console.error("getRecommendedByVariation EX:", e);
-
-    if (e instanceof RecommendationUpstreamError) {
-      return {
-        statusCode: 502,
-        body: {
-          products: [],
-          basedOn: { variationId: vid },
-          source: "knn",
-          error: `upstream_${e.upstreamStatus}`,
-          upstream: e.upstream,
-        },
-      };
-    }
-
-    if (e instanceof RecommendationAdapterError) {
-      return {
-        statusCode: 502,
-        body: {
-          products: [],
-          basedOn: { variationId: vid },
-          source: "knn",
-          error: "adapter_exception",
-          detail: { message: e.message, code: e.code, base: e.base ?? BASE },
-        },
-      };
-    }
-
-    return {
-      statusCode: 502,
-      body: {
-        products: [],
-        basedOn: { variationId: vid },
-        source: "knn",
-        error: "adapter_exception",
-        detail: { message: e.message, code: e.code, base: BASE },
-      },
-    };
-  }
-}
-
 async function listCategories() {
   try {
     const categories = await Category.findAll({
@@ -806,7 +641,6 @@ module.exports = {
   listProductsV2,
   getProductDetail,
   getSearchSuggestions,
-  getRecommendationsByVariation,
   listCategories,
   listBrands,
   compareProducts,

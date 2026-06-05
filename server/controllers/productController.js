@@ -1,5 +1,6 @@
 const catalogService = require("../services/product/catalogService");
 const qaService = require("../services/product/qaService");
+const recommendationService = require("../services/recommendation/recommendationService");
 
 function sendServiceError(res, error) {
   const payload = { message: error.message };
@@ -55,7 +56,7 @@ exports.getSearchSuggestions = async (req, res, next) => {
 
 exports.getRecommendedByVariation = async (req, res) => {
   try {
-    const result = await catalogService.getRecommendationsByVariation(
+    const result = await recommendationService.getByVariation(
       Number(req.params.variation_id)
     );
     return res.status(result.statusCode).json(result.body);
