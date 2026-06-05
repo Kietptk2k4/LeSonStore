@@ -1,5 +1,9 @@
 const vnpayGateway = require("../gateways/vnpayGateway");
 const {
+  applyTransition,
+  emitStatusChanged,
+} = require("../order/orderStateMachine");
+const {
   VNPAY_METHODS,
   VNPAY_REQUIRED_ENV,
   VNPAY_RESERVE_HOLD_MS,
@@ -131,8 +135,10 @@ async function applySuccessfulReturn({ order, payment, txnRef, vnp_Params }) {
   payment.paid_at = new Date();
   await payment.save();
 
-  order.status = "processing";
-  await order.save();
+  if (order.status === "AWAITING_PAYMENT") {
+    const { oldStatus, newStatus } = await applyTransition(order, "processing");
+    emitStatusChanged(order, oldStatus, newStatus, { source: "vnpay_return" });
+  }
 
   return { updated: true };
 }

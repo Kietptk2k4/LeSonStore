@@ -136,6 +136,7 @@ describe("POST /api/admin/orders/:order_id/deliver (deliverOrder)", () => {
 
   it("calls sendOrderUpdateEmail with old shipping and new delivered status", async () => {
     await postDeliver()
+    await new Promise((resolve) => setImmediate(resolve))
 
     expect(sendOrderUpdateEmail).toHaveBeenCalledWith(
       expect.objectContaining({

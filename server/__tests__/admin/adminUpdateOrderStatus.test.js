@@ -141,6 +141,7 @@ describe("PUT /api/admin/orders/:order_id/status (updateOrderStatus)", () => {
 
   it("calls sendOrderUpdateEmail with ORDER_STATUS and old/new data when buyer exists", async () => {
     await putStatus({ status: "shipping" })
+    await new Promise((resolve) => setImmediate(resolve))
 
     expect(sendOrderUpdateEmail).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -158,23 +159,24 @@ describe("PUT /api/admin/orders/:order_id/status (updateOrderStatus)", () => {
       Promise.reject(new Error("smtp failed"))
     )
 
-    const res = await putStatus({ status: "delivered" })
+    const res = await putStatus({ status: "shipping" })
     await new Promise((resolve) => setImmediate(resolve))
 
     expect(res.status).toBe(200)
     expect(res.body.message).toBe("Order status updated successfully")
-    expect(order.update).toHaveBeenCalledWith({ status: "delivered" })
+    expect(order.update).toHaveBeenCalledWith({ status: "shipping" })
   })
 
-  // FR: BR-01 — no FSM: processing → delivered allowed
-  it("allows override transition processing to delivered without guard (BR-01)", async () => {
+  // FSM: processing → delivered is no longer allowed (intentional vs BR-01)
+  it("returns 400 Invalid transition when processing to delivered (FSM)", async () => {
     order.status = "processing"
 
     const res = await putStatus({ status: "delivered" })
 
-    expect(res.status).toBe(200)
-    expect(order.update).toHaveBeenCalledWith({ status: "delivered" })
-    expect(order.status).toBe("delivered")
+    expect(res.status).toBe(400)
+    expect(res.body.message).toBe("Invalid transition: processing → delivered")
+    expect(order.update).not.toHaveBeenCalled()
+    expect(order.status).toBe("processing")
   })
 
   // FR: GAP-01 — no email when order owner user is null

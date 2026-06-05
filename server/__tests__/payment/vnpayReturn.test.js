@@ -57,6 +57,10 @@ const createOrderMock = (overrides = {}) => {
     order_code: "ORD-42",
     status: "AWAITING_PAYMENT",
     final_amount: 22530000,
+    update: jest.fn(async function updateOrder(data) {
+      Object.assign(this, data)
+      return this
+    }),
     save: jest.fn().mockImplementation(async function save() {
       return order
     }),
@@ -113,7 +117,7 @@ describe("GET /api/vnpay/return (vnpayReturn)", () => {
     expect(payment.paid_at).toBeInstanceOf(Date)
     expect(payment.save).toHaveBeenCalledTimes(1)
     expect(order.status).toBe("processing")
-    expect(order.save).toHaveBeenCalledTimes(1)
+    expect(order.update).toHaveBeenCalledWith({ status: "processing" })
   })
 
   // FR: BR-04 — idempotent when payment already completed

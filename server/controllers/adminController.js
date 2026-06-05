@@ -2,6 +2,13 @@ const { Product, ProductVariation, ProductImage, Category, Brand, Order, OrderIt
 const { Op, Sequelize } = require("sequelize")
 const sequelize = require("../config/database")
 const { uploadProductFiles } = require("../middleware/upload")
+const {
+  applyTransition,
+  emitStatusChanged,
+} = require("../services/order/orderStateMachine")
+const { registerOrderListeners } = require("../events/listeners")
+
+registerOrderListeners()
 
 // Product Management
 exports.createProduct = [
@@ -438,26 +445,16 @@ exports.updateOrderStatus = async (req, res, next) => {
       return res.status(404).json({ message: "Order not found" })
     }
 
-    const oldStatus = order.status;
-    await order.update({ status })
-
-    // Gửi email thông báo cập nhật trạng thái
     try {
-      const { sendOrderUpdateEmail } = require("../services/emailService");
-      const { User } = require('../models');
-      const user = await User.findByPk(order.user_id);
-
-      if (user) {
-        sendOrderUpdateEmail({
-          order,
-          changeType: 'ORDER_STATUS',
-          oldData: { status: oldStatus },
-          newData: { status: order.status },
-          user
-        }).catch(err => console.error("Order status update email failed:", err));
+      const { oldStatus, newStatus } = await applyTransition(order, status);
+      emitStatusChanged(order, oldStatus, newStatus, {
+        source: "admin_updateOrderStatus",
+      });
+    } catch (err) {
+      if (err.status === 400) {
+        return res.status(400).json({ message: err.message });
       }
-    } catch (emailError) {
-      console.error("Failed to queue order status update email:", emailError);
+      throw err;
     }
 
     res.json({
@@ -479,30 +476,19 @@ exports.shipOrder = async (req, res, next) => {
       return res.status(404).json({ message: "Order not found" })
     }
 
-    if (order.status !== 'processing') {
-      return res.status(400).json({ message: "Order must be in processing status to ship" })
-    }
-
-    const oldStatus = order.status;
-    await order.update({ status: 'shipping' })
-
-    // Gửi email thông báo bắt đầu giao hàng
     try {
-      const { sendOrderUpdateEmail } = require("../services/emailService");
-      const { User } = require('../models');
-      const user = await User.findByPk(order.user_id);
-
-      if (user) {
-        sendOrderUpdateEmail({
-          order,
-          changeType: 'ORDER_STATUS',
-          oldData: { status: oldStatus },
-          newData: { status: 'shipping' },
-          user
-        }).catch(err => console.error("Order shipping email failed:", err));
+      const { oldStatus, newStatus } = await applyTransition(order, "shipping");
+      emitStatusChanged(order, oldStatus, newStatus, { source: "admin_ship" });
+    } catch (err) {
+      if (err.status === 400 && order.status !== "processing") {
+        return res
+          .status(400)
+          .json({ message: "Order must be in processing status to ship" });
       }
-    } catch (emailError) {
-      console.error("Failed to queue order shipping email:", emailError);
+      if (err.status === 400) {
+        return res.status(400).json({ message: err.message });
+      }
+      throw err;
     }
 
     res.json({
@@ -524,30 +510,19 @@ exports.deliverOrder = async (req, res, next) => {
       return res.status(404).json({ message: "Order not found" })
     }
 
-    if (order.status !== 'shipping') {
-      return res.status(400).json({ message: "Order must be in shipping status to deliver" })
-    }
-
-    const oldStatus = order.status;
-    await order.update({ status: 'delivered' })
-
-    // Gửi email thông báo giao hàng thành công
     try {
-      const { sendOrderUpdateEmail } = require("../services/emailService");
-      const { User } = require('../models');
-      const user = await User.findByPk(order.user_id);
-
-      if (user) {
-        sendOrderUpdateEmail({
-          order,
-          changeType: 'ORDER_STATUS',
-          oldData: { status: oldStatus },
-          newData: { status: 'delivered' },
-          user
-        }).catch(err => console.error("Order delivery email failed:", err));
+      const { oldStatus, newStatus } = await applyTransition(order, "delivered");
+      emitStatusChanged(order, oldStatus, newStatus, { source: "admin_deliver" });
+    } catch (err) {
+      if (err.status === 400 && order.status !== "shipping") {
+        return res
+          .status(400)
+          .json({ message: "Order must be in shipping status to deliver" });
       }
-    } catch (emailError) {
-      console.error("Failed to queue order delivery email:", emailError);
+      if (err.status === 400) {
+        return res.status(400).json({ message: err.message });
+      }
+      throw err;
     }
 
     res.json({

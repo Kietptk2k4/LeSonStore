@@ -13,6 +13,10 @@ const orderRepository = require("./orderRepository");
 const { getStrategy } = require("../payment/paymentStrategy");
 const { emitOrderEvent } = require("../../events/orderEventBus");
 const { registerOrderListeners } = require("../../events/listeners");
+const {
+  applyTransition,
+  emitStatusChanged,
+} = require("./orderStateMachine");
 
 registerOrderListeners();
 
@@ -388,10 +392,10 @@ async function cancelOrder({ userId, orderId, reason }) {
       );
     }
 
-    await order.update(
-      { status: "cancelled", note: appendNote(order.note, trimmedReason) },
-      { transaction: t }
-    );
+    const { oldStatus } = await applyTransition(order, "cancelled", {
+      transaction: t,
+      extraOrderFields: { note: appendNote(order.note, trimmedReason) },
+    });
 
     if (payment) {
       if (isAwaitingVnpay || isToShipCOD) {
@@ -407,6 +411,10 @@ async function cancelOrder({ userId, orderId, reason }) {
     await t.commit();
 
     emitOrderEvent("order.cancelled", { order, payment, userId });
+    emitStatusChanged(order, oldStatus, "cancelled", {
+      source: "customer_cancel",
+      payment,
+    });
 
     return {
       statusCode: 200,

@@ -1,0 +1,39 @@
+@startuml order-state-machine
+title LeSonStore — Order status state machine (Bước 4)
+
+skinparam state {
+  BackgroundColor #F8F9FA
+  BorderColor #333
+}
+
+[*] --> AWAITING_PAYMENT : create (VNPAY)\n/create (COD → processing*)
+
+note right of AWAITING_PAYMENT
+  * COD create có thể set processing
+  trực tiếp tại create — không qua FSM
+end note
+
+AWAITING_PAYMENT --> processing : vnpay_return\napplyTransition
+AWAITING_PAYMENT --> cancelled : customer_cancel
+
+processing --> shipping : admin_ship\nadmin PUT
+processing --> cancelled : customer_cancel
+
+shipping --> delivered : admin_deliver\nadmin PUT
+
+delivered --> [*]
+cancelled --> [*]
+
+FAILED --> AWAITING_PAYMENT : retry flow\n(if used)
+
+state "orderStateMachine.js" as FSM {
+  state assertTransition
+  state applyTransition
+}
+
+note bottom of FSM
+  emitStatusChanged → order.status.changed
+  (sau commit, không trong transaction)
+end note
+
+@enduml

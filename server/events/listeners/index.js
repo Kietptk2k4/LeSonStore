@@ -5,6 +5,7 @@ function registerOrderListeners() {
   registered = true;
   require("./orderCreatedListener");
   require("./orderPaymentMethodChangedListener");
+  require("./orderStatusChangedListener");
 }
 
 module.exports = { registerOrderListeners };
