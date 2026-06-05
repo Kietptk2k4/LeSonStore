@@ -13,6 +13,7 @@ const { Op } = require("sequelize");
 const { quoteShipping } = require("../services/shippingService");
 const orderFacade = require("../services/order/orderFacade");
 const vnpayStrategy = require("../services/payment/vnpayStrategy");
+const { emitOrderEvent } = require("../events/orderEventBus");
 const { getIO } = require("../config/socket")
 const toVnd = (x) => Math.max(0, Math.round(Number(x) || 0));
 
@@ -901,6 +902,12 @@ exports.updateShippingAddress = async (req, res, next) => {
       });
     }
 
+    const oldData = {
+      shipping_name: order.shipping_name,
+      shipping_phone: order.shipping_phone,
+      shipping_address: order.shipping_address,
+    };
+
     // Cập nhật đơn
     const patch = {
       shipping_name: shipping_name ?? order.shipping_name,
@@ -927,32 +934,17 @@ exports.updateShippingAddress = async (req, res, next) => {
 
     await t.commit();
 
-    // Gửi email thông báo cập nhật địa chỉ
-    try {
-      const { sendOrderUpdateEmail } = require("../services/emailService");
-      const { User } = require('../models');
-      const user = await User.findByPk(order.user_id);
-
-      if (user) {
-        sendOrderUpdateEmail({
-          order,
-          changeType: 'SHIPPING_ADDRESS',
-          oldData: {
-            shipping_name: order._previousDataValues?.shipping_name,
-            shipping_phone: order._previousDataValues?.shipping_phone,
-            shipping_address: order._previousDataValues?.shipping_address,
-          },
-          newData: {
-            shipping_name: order.shipping_name,
-            shipping_phone: order.shipping_phone,
-            shipping_address: order.shipping_address,
-          },
-          user
-        }).catch(err => console.error("Shipping address update email failed:", err));
-      }
-    } catch (emailError) {
-      console.error("Failed to queue shipping address update email:", emailError);
-    }
+    const newData = {
+      shipping_name: order.shipping_name,
+      shipping_phone: order.shipping_phone,
+      shipping_address: order.shipping_address,
+    };
+    emitOrderEvent("order.shipping_address.changed", {
+      order,
+      oldData,
+      newData,
+      userId: order.user_id,
+    });
 
     console.log('updateShippingAddress success for order:', order.order_id);
     return res.json({

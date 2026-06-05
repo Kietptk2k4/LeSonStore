@@ -53,16 +53,4 @@ bus.on("order.created", async (payload) => {
   } catch (notifError) {
     console.error(">>> [DEBUG] Lỗi CHẾT thông báo đơn hàng:", notifError);
   }
-
-  try {
-    const { sendOrderConfirmationEmail } = require("../../services/emailService");
-    sendOrderConfirmationEmail({
-      order,
-      items_breakdown,
-      payment_provider,
-      payment_method,
-    }).catch((err) => console.error("Email send failed:", err));
-  } catch (emailError) {
-    console.error("Failed to queue order confirmation email:", emailError);
-  }
 });

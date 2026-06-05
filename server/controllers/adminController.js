@@ -7,6 +7,7 @@ const {
   emitStatusChanged,
 } = require("../services/order/orderStateMachine")
 const { registerOrderListeners } = require("../events/listeners")
+const { emitOrderEvent } = require("../events/orderEventBus")
 
 registerOrderListeners()
 
@@ -559,27 +560,7 @@ exports.refundOrder = async (req, res, next) => {
       await order.payment.update({ payment_status: 'refunded' })
     }
 
-    // Gửi email thông báo hoàn tiền
-    try {
-      const { sendOrderUpdateEmail } = require("../services/emailService");
-      const { User } = require('../models');
-      const user = await User.findByPk(order.user_id);
-
-      if (user) {
-        sendOrderUpdateEmail({
-          order,
-          changeType: 'ORDER_REFUND',
-          oldData: {},
-          newData: {
-            amount: order.final_amount,
-            provider: order.payment?.provider
-          },
-          user
-        }).catch(err => console.error("Order refund email failed:", err));
-      }
-    } catch (emailError) {
-      console.error("Failed to queue order refund email:", emailError);
-    }
+    emitOrderEvent("order.refunded", { order, payment: order.payment })
 
     res.json({
       message: "Order refunded successfully",

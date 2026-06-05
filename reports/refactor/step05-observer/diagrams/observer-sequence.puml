@@ -1,0 +1,40 @@
+@startuml observer-sequence
+title LeSonStore — Observer: Facade/Controller → Event → Side-effect (Bước 5)
+
+actor Client
+participant "orderFacade /\nController" as Ctrl
+database "DB\n(transaction)" as DB
+participant "orderEventBus" as Bus
+participant "orderEmailListener" as EmailL
+participant "orderCreatedListener" as NotifL
+participant "orderPaymentCompletedListener" as PayL
+participant "emailService" as Email
+participant "notificationService" as Notif
+
+== Ví dụ: tạo đơn (Bước 3) ==
+Client -> Ctrl : createOrder HTTP
+Ctrl -> DB : commit
+Ctrl -> Bus : emit order.created
+Bus -> NotifL : async
+NotifL -> Notif : createNotification (staff)
+Bus -> EmailL : async
+EmailL -> Email : sendOrderConfirmationEmail
+
+== Ví dụ: VNPAY return (Bước 5) ==
+Client -> Ctrl : GET /vnpay/return
+Ctrl -> DB : applySuccessfulReturn
+Ctrl -> Bus : emit payment.completed\n(if updated)
+Bus -> PayL : async
+PayL -> Notif : payment_success (user)
+PayL -> Notif : payment_received (staff)
+Ctrl --> Client : 302 redirect
+
+== Ví dụ: đổi địa chỉ giao (Bước 5) ==
+Client -> Ctrl : PUT shipping address
+Ctrl -> DB : commit
+Ctrl -> Bus : emit order.shipping_address.changed
+Bus -> EmailL : async
+EmailL -> Email : sendOrderUpdateEmail SHIPPING_ADDRESS
+Ctrl --> Client : 200 JSON
+
+@enduml
