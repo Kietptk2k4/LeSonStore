@@ -10,6 +10,7 @@ const {
 const sequelize = require("../../config/database");
 const { quoteShipping } = require("../shippingService");
 const orderRepository = require("./orderRepository");
+const { buildOrderPricing, toVnd } = require("./orderPricing");
 const { getStrategy } = require("../payment/paymentStrategy");
 const { emitOrderEvent } = require("../../events/orderEventBus");
 const { registerOrderListeners } = require("../../events/listeners");
@@ -19,8 +20,6 @@ const {
 } = require("./orderStateMachine");
 
 registerOrderListeners();
-
-const toVnd = (x) => Math.max(0, Math.round(Number(x) || 0));
 
 function generateOrderCode() {
   const timestamp = Date.now().toString(36).toUpperCase();
@@ -139,57 +138,25 @@ async function createFromCart({ userId, user, body, req }) {
       }));
     }
 
-    let totalAmount = 0;
-    let discountAmount = 0;
+    const pricingLines = itemsForOrder.map((it) => ({
+      variation: it.variation,
+      quantity: it.quantity,
+    }));
 
-    for (const it of itemsForOrder) {
-      const v = it.variation;
-      const available = Number(v.stock_quantity || 0);
-      if (!v.is_available || available < it.quantity) {
-        await t.rollback();
-        throwHttp(
-          400,
-          `Insufficient stock for ${
-            v.product?.product_name || `variation ${it.variation_id}`
-          }`
-        );
-      }
-
-      const price = Number(v.price);
-      const pct = Math.max(0, Number(v.product?.discount_percentage || 0));
-      const itemTotal = price * it.quantity;
-      const itemDiscount = Math.round(((price * pct) / 100) * it.quantity);
-
-      totalAmount += itemTotal;
-      discountAmount += itemDiscount;
+    let pricing;
+    try {
+      pricing = buildOrderPricing(pricingLines, { stockMode: "strict" });
+    } catch (err) {
+      await t.rollback();
+      throw err;
     }
 
-    const items_breakdown = itemsForOrder.map((it) => {
-      const v = it.variation;
-      const price = Number(v.price);
-      const pct = Math.max(0, Number(v.product?.discount_percentage || 0));
-      const unit_discount_amount = Math.round((price * pct) / 100);
-      const unit_final_price = Math.max(0, price - unit_discount_amount);
-      const itemTotal = price * it.quantity;
-      const itemDiscount = Math.round(unit_discount_amount * it.quantity);
-
-      return {
-        variation_id: it.variation_id,
-        product_name: v.product?.product_name || null,
-        quantity: it.quantity,
-        unit_price: Math.round(price),
-        unit_discount_amount,
-        unit_final_price,
-        item_total: Math.round(itemTotal),
-        item_discount: itemDiscount,
-        item_subtotal_after_discount: Math.max(
-          0,
-          Math.round(itemTotal - itemDiscount)
-        ),
-      };
-    });
-
-    const subtotalAfterDiscount = toVnd(totalAmount - discountAmount);
+    const {
+      items_breakdown,
+      total_amount: totalAmount,
+      discount_amount: discountAmount,
+    } = pricing;
+    const subtotalAfterDiscount = pricing.subtotal_after_discount;
     const { shipping_fee } = await quoteShipping({
       province_id,
       ward_id,
@@ -538,8 +505,62 @@ async function changePaymentMethod({ userId, orderId, provider, method, req }) {
   }
 }
 
+async function previewOrder({ body }) {
+  const { items = [], province_id, ward_id } = body || {};
+
+  if (!Array.isArray(items) || items.length === 0) {
+    throwHttp(400, "No items");
+  }
+  if (!province_id) {
+    throwHttp(400, "Missing province_id");
+  }
+
+  const lines = [];
+  for (const it of items) {
+    const v = await ProductVariation.findByPk(it.variation_id, {
+      include: [{ model: Product, as: "product" }],
+    });
+    if (!v) {
+      throwHttp(400, `Variation ${it.variation_id} not found`);
+    }
+    lines.push({
+      variation: v,
+      quantity: Math.max(1, Number(it.quantity || 1)),
+    });
+  }
+
+  const pricing = buildOrderPricing(lines, {
+    stockMode: "warn",
+    includeCatalogFields: true,
+  });
+
+  const { shipping_fee, reason } = await quoteShipping({
+    province_id: Number(province_id),
+    ward_id: ward_id ? Number(ward_id) : null,
+    subtotal: pricing.subtotal_after_discount,
+  });
+
+  const final_amount =
+    pricing.subtotal_after_discount + Number(shipping_fee || 0);
+
+  return {
+    statusCode: 200,
+    body: {
+      total_amount: pricing.total_amount,
+      discount_amount: pricing.discount_amount,
+      subtotal_after_discount: pricing.subtotal_after_discount,
+      shipping_fee,
+      shipping_reason: reason || null,
+      final_amount,
+      items_breakdown: pricing.items_breakdown,
+      stock_warnings: pricing.stock_warnings,
+    },
+  };
+}
+
 module.exports = {
   createFromCart,
   cancelOrder,
   changePaymentMethod,
+  previewOrder,
 };

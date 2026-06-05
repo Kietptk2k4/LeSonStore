@@ -14,7 +14,7 @@ Luồng tương đương `POST /api/orders` (logic cũ `createOrder`).
 |------|---------|
 | Validate | geo, `getStrategy`, `validateMethod` |
 | Items | body `items` hoặc cart |
-| Pricing | stock check, `quoteShipping`, `Order.create` |
+| Pricing | `buildOrderPricing` (strict), `quoteShipping`, `Order.create` |
 | Persist | `reserveVariationStock`, `OrderItem.create`, `createPaymentRecord` |
 | Cart | clear selected / full cart |
 | Payment | `strategy.afterOrderCreated` → redirect |
@@ -87,6 +87,49 @@ Luồng `POST /api/orders/:order_id/payment-method`.
   }
 }
 ```
+
+---
+
+## `previewOrder({ body })`
+
+Luồng `POST /api/orders/preview` — **read-only**, không transaction, không `emitOrderEvent`.
+
+| Bước | Hành vi |
+|------|---------|
+| Validate | `items` không rỗng, `province_id` bắt buộc |
+| Load | `ProductVariation.findByPk` + `product` |
+| Pricing | `buildOrderPricing(lines, { stockMode: 'warn', includeCatalogFields: true })` |
+| Shipping | `quoteShipping` → `final_amount` |
+
+**Return:**
+
+```js
+{
+  statusCode: 200,
+  body: {
+    total_amount,
+    discount_amount,
+    subtotal_after_discount,
+    shipping_fee,
+    shipping_reason,
+    final_amount,
+    items_breakdown,  // có thumbnail_url, slug
+    stock_warnings
+  }
+}
+```
+
+---
+
+## Domain Service — `orderPricing.js`
+
+| Hàm | Mô tả |
+|-----|--------|
+| `buildOrderPricing(lines, options)` | Tổng hợp giá + stock |
+| `computeLineBreakdown(line, options)` | Một dòng breakdown |
+
+`stockMode: 'strict'` → throw 400 hết hàng (create).  
+`stockMode: 'warn'` → `stock_warnings` (preview).
 
 ---
 

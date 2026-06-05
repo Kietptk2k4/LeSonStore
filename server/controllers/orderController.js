@@ -427,107 +427,12 @@ exports.cancelOrder = async (req, res, next) => {
 };
 
 
-// controllers/orderController.js (thêm vào file bạn đang có)
 exports.previewOrder = async (req, res, next) => {
   try {
-    const { items = [], province_id, ward_id } = req.body || {};
-    if (!Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ message: "No items" });
-    }
-    if (!province_id) {
-      return res.status(400).json({ message: "Missing province_id" });
-    }
-
-    const rows = [];
-    for (const it of items) {
-      const v = await ProductVariation.findByPk(it.variation_id, {
-        include: [{ model: Product, as: "product" }], // ✅ alias đúng
-      });
-      if (!v)
-        return res
-          .status(400)
-          .json({ message: `Variation ${it.variation_id} not found` });
-      rows.push({ v, qty: Math.max(1, Number(it.quantity || 1)) });
-    }
-
-    let total_amount = 0; // tổng gốc
-    let discount_amount = 0; // tổng giảm (tiền)
-    const stock_warnings = [];
-
-    const items_breakdown = rows.map(({ v, qty }) => {
-      const available = Number(v.stock_quantity || 0);
-      if (!v.is_available || available < qty) {
-        stock_warnings.push({
-          variation_id: v.variation_id,
-          message: `Only ${available} left in stock`,
-        });
-      }
-
-      const unit_price = Number(v.price);
-      const unit_discount_amount = Math.max(
-        0,
-        Math.round(
-          Number((unit_price * v.product?.discount_percentage) / 100 || 0)
-        )
-      );
-      const unit_final_price = Math.max(
-        0,
-        Math.round(unit_price - unit_discount_amount)
-      );
-
-      const item_total = Math.round(unit_price * qty);
-      const item_discount = Math.round(unit_discount_amount * qty);
-      const item_subtotal_after_discount = Math.max(
-        0,
-        Math.round(unit_final_price * qty)
-      );
-
-      total_amount += item_total;
-      discount_amount += item_discount;
-
-      return {
-        variation_id: v.variation_id,
-        product_name: v.product?.product_name || null,
-        quantity: qty,
-
-        unit_price: Math.round(unit_price),
-        unit_discount_amount, // tiền giảm / unit
-        unit_final_price, // giá sau giảm / unit
-
-        item_total, // gốc * qty
-        item_discount, // giảm * qty
-        item_subtotal_after_discount, // sau giảm * qty
-
-        thumbnail_url: v.product?.thumbnail_url || null,
-        slug: v.product?.slug || null,
-      };
-    });
-
-    const subtotal_after_discount = Math.max(
-      0,
-      Math.round(total_amount - discount_amount)
-    );
-
-    const { shipping_fee, reason } = await quoteShipping({
-      province_id: Number(province_id),
-      ward_id: ward_id ? Number(ward_id) : null,
-      subtotal: subtotal_after_discount,
-    });
-
-    const final_amount = subtotal_after_discount + Number(shipping_fee || 0);
-
-    return res.json({
-      total_amount,
-      discount_amount,
-      subtotal_after_discount,
-      shipping_fee,
-      shipping_reason: reason || null,
-      final_amount,
-      items_breakdown,
-      stock_warnings,
-    });
+    const result = await orderFacade.previewOrder({ body: req.body });
+    return res.status(result.statusCode).json(result.body);
   } catch (error) {
-    next(error);
+    return handleFacadeError(error, res, next);
   }
 };
 

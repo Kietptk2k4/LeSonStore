@@ -34,7 +34,7 @@
 
 - `getUserOrdersV2`, `getOrderDetail`, `previewOrder`, `retryVnpayPayment`, `updateShippingAddress`, …
 
-Chỉ **createOrder**, **cancelOrder**, **changePaymentMethod** gọi facade.
+**createOrder**, **cancelOrder**, **changePaymentMethod**, **previewOrder** gọi facade. Pricing dùng chung `orderPricing.js` (C1).
 
 ## Không làm trong bước này
 
